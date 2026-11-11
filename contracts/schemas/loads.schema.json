@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loads.schema.json",
+  "title": "Loads",
+  "description": "荷载子系统的输出，同时是 SAP2000 子系统要读取的荷载部分。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "design_case_revision",
+    "cases",
+    "combinations",
+    "trace"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "design_case_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cases": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/case" }
+    },
+    "combinations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/combination" }
+    },
+    "trace": {
+      "type": "array",
+      "description": "公式、代入过程和规范条款，供计算书引用。",
+      "items": { "$ref": "#/$defs/trace_step" }
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "value", "unit"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "target": {
+          "type": "string",
+          "description": "作用位置，如构件、面或节点。由产品包解释。"
+        },
+        "value": { "type": "number" },
+        "unit": { "type": "string" },
+        "formula_id": { "type": "string" }
+      }
+    },
+    "combination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "factors"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "factors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["case_id", "factor"],
+            "properties": {
+              "case_id": { "type": "string", "minLength": 1 },
+              "factor": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "trace_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formula_id", "expression", "result", "unit"],
+      "properties": {
+        "formula_id": { "type": "string" },
+        "clause": { "type": "string", "description": "规范条款。" },
+        "expression": { "type": "string" },
+        "substitution": { "type": "string", "description": "代入后的算式。" },
+        "result": { "type": "number" },
+        "unit": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0.0",
+  "project_id": "SAMPLE",
+  "revision": "r0",
+  "product_family": "待定",
+  "status": "confirmed",
+  "site": {
+    "client_name": null,
+    "project_name": null,
+    "country": null,
+    "capacity_mw_dc": null,
+    "longitude": null,
+    "longitude_hemisphere": null,
+    "latitude": null,
+    "latitude_hemisphere": null,
+    "altitude_m": null,
+    "design_code": null,
+    "wind_speed": null,
+    "wind_speed_unit": null,
+    "wind_speed_averaging": null,
+    "snow_load": null,
+    "snow_load_unit": null,
+    "seismic_load": null,
+    "seismic_load_unit": null,
+    "temperature_low_c": null,
+    "temperature_high_c": null,
+    "risk_category": null,
+    "geological_type": null,
+    "documents": {
+      "module_datasheet": null,
+      "layout": null,
+      "site_geological_plan": null,
+      "pull_out_test_report": null,
+      "topographic_drawing": null,
+      "cable_route_plan": null
+    },
+    "remarks": null
+  },
+  "geometry": {
+    "mounting_type": null,
+    "module_length_mm": null,
+    "module_width_mm": null,
+    "module_thickness_mm": null,
+    "module_weight_kg": null,
+    "module_power_wp": null,
+    "modules_per_string": null,
+    "module_type": null,
+    "module_orientation": null,
+    "arrangement_rows": null,
+    "arrangement_columns": null,
+    "foundation_type": null,
+    "pile_embedment_depth_mm": null,
+    "tilt_angle_deg": null,
+    "ground_clearance_mm": null
+  },
+  "materials": {
+    "corrosion_category": null
+  },
+  "code_pack": null,
+  "parameters": []
+}

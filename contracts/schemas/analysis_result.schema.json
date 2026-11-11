@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "analysis_result.schema.json",
+  "title": "AnalysisResult",
+  "description": "SAP2000 子系统读回的结果。后续图纸、计算书、BOM 只读这份文件。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "design_case_revision",
+    "model_file",
+    "template",
+    "check_status",
+    "members",
+    "reactions",
+    "displacements"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "design_case_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_file": { "type": "string" },
+    "template": {
+      "type": "string",
+      "description": "所用 SAP2000 模板名称，对应 sap2000/templates/。"
+    },
+    "check_status": {
+      "enum": ["passed", "failed", "not_checked"]
+    },
+    "members": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/member" }
+    },
+    "reactions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/reaction" }
+    },
+    "displacements": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/displacement" }
+    }
+  },
+  "$defs": {
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "section", "length", "forces", "ratio"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "section": { "type": "string" },
+        "length": { "type": "number", "description": "长度，单位 m。" },
+        "forces": {
+          "type": "object",
+          "description": "控制内力。键名由建模 skill 统一，如 N、Vy、Vz、T、My、Mz，单位 kN 或 kN·m。",
+          "additionalProperties": { "type": "number" }
+        },
+        "ratio": {
+          "type": "number",
+          "description": "应力比。尚未验算时写 -1。"
+        }
+      }
+    },
+    "reaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string" },
+        "fx": { "type": "number" },
+        "fy": { "type": "number" },
+        "fz": { "type": "number" },
+        "mx": { "type": "number" },
+        "my": { "type": "number" },
+        "mz": { "type": "number" }
+      }
+    },
+    "displacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string" },
+        "ux": { "type": "number" },
+        "uy": { "type": "number" },
+        "uz": { "type": "number" },
+        "unit": { "type": "string", "default": "m" }
+      }
+    }
+  }
+}

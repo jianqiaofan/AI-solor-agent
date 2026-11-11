@@ -1,0 +1,17 @@
+name: ai-solor-agent
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - tk
+  - pip
+  - pip:
+      - pymupdf
+      - jsonschema
+      - tkinterdnd2
+      - langchain-deepseek
+      - python-dotenv
+      - fastapi
+      - python-multipart
+      - uvicorn
+      - pywebview

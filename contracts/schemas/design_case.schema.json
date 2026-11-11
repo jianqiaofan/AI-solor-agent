@@ -1,0 +1,405 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "design_case.schema.json",
+  "title": "DesignCase",
+  "description": "已锁定或草稿状态的设计案例。荷载子系统只接受 status 为 confirmed 的文件。site、geometry、materials 收录固定倾角资料表 Design Data Collection Sheet 的全部字段。每个字段都必须出现；资料未填写或尚未识别时为 null，作为后续手工补录的占位。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_id",
+    "revision",
+    "product_family",
+    "status",
+    "site",
+    "geometry",
+    "materials",
+    "code_pack",
+    "parameters"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "product_family": {
+      "type": "string",
+      "minLength": 1,
+      "description": "产品包名称，对应 products/ 下的目录。固定倾角资料表使用 fixed_tilt。"
+    },
+    "status": {
+      "enum": ["draft", "confirmed"]
+    },
+    "site": {
+      "$ref": "#/$defs/site"
+    },
+    "geometry": {
+      "$ref": "#/$defs/geometry"
+    },
+    "materials": {
+      "$ref": "#/$defs/materials"
+    },
+    "code_pack": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "规范包名称，取资料表 Design Code 的原文。尚未识别时为 null，不写入暂定规范。"
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/parameter"
+      }
+    }
+  },
+  "$defs": {
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "资料表第 1、2、4、6、8、9 节，以及确认时补录的风速时距。属性必须全部出现，空白为 null。",
+      "required": [
+        "client_name",
+        "project_name",
+        "country",
+        "capacity_mw_dc",
+        "longitude",
+        "longitude_hemisphere",
+        "latitude",
+        "latitude_hemisphere",
+        "altitude_m",
+        "design_code",
+        "wind_speed",
+        "wind_speed_unit",
+        "wind_speed_averaging",
+        "snow_load",
+        "snow_load_unit",
+        "seismic_load",
+        "seismic_load_unit",
+        "temperature_low_c",
+        "temperature_high_c",
+        "risk_category",
+        "geological_type",
+        "documents",
+        "remarks"
+      ],
+      "properties": {
+        "client_name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "客户名称。第 1 节 Client Name，表单域 CLIENT NAME。"
+        },
+        "project_name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "项目名称。第 1 节 Project Name，表单域 PROJECT NAME。以表单域的值为准。"
+        },
+        "country": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "国家。第 1 节 Country，表单域 country。"
+        },
+        "capacity_mw_dc": {
+          "type": ["number", "null"],
+          "description": "直流侧容量，单位 MW(DC)。第 1 节 Capacity，表单域 capacity。单位印在标签上。"
+        },
+        "longitude": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "经度，按表单原样保留度分秒文本。第 2 节 Longtitude，表单域 LONGTITUDE。"
+        },
+        "longitude_hemisphere": {
+          "enum": ["E", "W", null],
+          "description": "经度半球。第 2 节，表单域 E-W。"
+        },
+        "latitude": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "纬度，按表单原样保留度分秒文本。第 2 节 Latitude，表单域 Latitude。"
+        },
+        "latitude_hemisphere": {
+          "enum": ["N", "S", null],
+          "description": "纬度半球。第 2 节，表单域 N,S。"
+        },
+        "altitude_m": {
+          "type": ["number", "null"],
+          "description": "海拔，单位 m。第 2 节 Altitude，表单域 Altitude。"
+        },
+        "design_code": {
+          "enum": [
+            "USA(ASCE7-05)",
+            "USA(ASCE7-10)",
+            "USA(ASCE7-16)",
+            "Saudi(SBC301)",
+            "India(IS875)",
+            "Brazil(NBR 6123)",
+            "Philippines(NSCP 2010)",
+            "Mexico(CFE Code)",
+            "Australia(AS 1170)",
+            "Europe(Eurocode 1991-4)",
+            null
+          ],
+          "description": "设计规范。第 4 节 Design Code，表单域 design code。有值时与 code_pack 相同。"
+        },
+        "wind_speed": {
+          "type": ["number", "null"],
+          "description": "风速。第 4 节 Wind Speed，表单域 WIND。单位见 wind_speed_unit。"
+        },
+        "wind_speed_unit": {
+          "enum": ["m/s", "km/h", "mph", null],
+          "description": "风速单位。表单域 wind uint。"
+        },
+        "wind_speed_averaging": {
+          "enum": ["3 s gust", "fastest-mile", "10 min mean", "1 h mean", null],
+          "description": "所给风速的时距。资料表上没有这一项，在确认窗体里按设计规范选择。各规范的第一项是基本风速的定义：ASCE 7-10、ASCE 7-16、SBC 301、IS 875、NBR 6123、NSCP 2010、CFE 和 AS 1170 为 3 s 阵风；ASCE 7-05 同样以 3 s 阵风为基本风速，并保留 fastest-mile；Eurocode 1991-1-4 为 10 min 平均。其余选项是该规范下客户资料可能给出的其他时距。尚未选择设计规范时只能为 null。"
+        },
+        "terrain_category": {
+          "enum": ["0", "I", "II", "III", "IV", null],
+          "description": "EN 1991-1-4 表 4.1 地形类别。资料表没有这一项，由对话补录。未补录时可以不出现。"
+        },
+        "snow_exposure": {
+          "enum": ["windswept", "normal", "sheltered", null],
+          "description": "EN 1991-1-3 雪荷载暴露条件。windswept 为四周无遮挡。资料表没有这一项，由对话补录。未补录时可以不出现。"
+        },
+        "snow_load": {
+          "type": ["number", "null"],
+          "description": "雪荷载。第 4 节 Snow Load，表单域 SNOW。单位见 snow_load_unit。"
+        },
+        "snow_load_unit": {
+          "enum": ["KN/m2", "psf", null],
+          "description": "雪荷载单位。表单域 SNOW UNIT。KN/m2 即 kN/m²。"
+        },
+        "seismic_load": {
+          "type": ["number", "null"],
+          "description": "地震作用。第 4 节 Seismic Load，表单域 seismic。单位见 seismic_load_unit，按表单原文记录。"
+        },
+        "seismic_load_unit": {
+          "enum": ["KN/m2", "psf", null],
+          "description": "地震作用单位。表单域 Dropdown8。"
+        },
+        "temperature_low_c": {
+          "type": ["number", "null"],
+          "description": "温度范围下限，单位 °C。第 4 节 Temperature Range，表单域 low temperature。"
+        },
+        "temperature_high_c": {
+          "type": ["number", "null"],
+          "description": "温度范围上限，单位 °C。表单域 high temperature。"
+        },
+        "risk_category": {
+          "enum": ["I", "II", "III", "IV", null],
+          "description": "风险类别。第 4 节 Risk Category，表单域 Dropdown1。"
+        },
+        "geological_type": {
+          "enum": ["Type 1", "Type 2", "Type 3", "Type 4", null],
+          "description": "场地类型。第 6 节 Site Geological Type，表单域 Group14，按选项旁的印刷标签取值，不使用单选导出值。Type 1：Offshore seas and islands, coasts, lake shores。Type 2：Flat Site with few obstacles。Type 3：Urban areas with dense buildings。Type 4：Urban areas with dense buildings and high housing。"
+        },
+        "documents": {
+          "$ref": "#/$defs/documents"
+        },
+        "remarks": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "备注原文。第 9 节 Remarks，表单域 Text5。"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "design_code": { "type": "null" } },
+            "required": ["design_code"]
+          },
+          "then": {
+            "properties": { "wind_speed_averaging": { "type": "null" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "design_code": { "const": "USA(ASCE7-05)" } },
+            "required": ["design_code"]
+          },
+          "then": {
+            "properties": {
+              "wind_speed_averaging": { "enum": ["3 s gust", "fastest-mile", "10 min mean", "1 h mean", null] }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "design_code": { "enum": ["USA(ASCE7-10)", "USA(ASCE7-16)", "Saudi(SBC301)", "India(IS875)", "Brazil(NBR 6123)", "Philippines(NSCP 2010)", "Mexico(CFE Code)", "Australia(AS 1170)"] } },
+            "required": ["design_code"]
+          },
+          "then": {
+            "properties": {
+              "wind_speed_averaging": { "enum": ["3 s gust", "10 min mean", "1 h mean", null] }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "design_code": { "const": "Europe(Eurocode 1991-4)" } },
+            "required": ["design_code"]
+          },
+          "then": {
+            "properties": {
+              "wind_speed_averaging": { "enum": ["10 min mean", "3 s gust", "1 h mean", null] }
+            }
+          }
+        }
+      ]
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "资料表第 2 节的支架形式，以及第 3、5 节。属性必须全部出现，空白为 null。",
+      "required": [
+        "mounting_type",
+        "module_length_mm",
+        "module_width_mm",
+        "module_thickness_mm",
+        "module_weight_kg",
+        "module_power_wp",
+        "modules_per_string",
+        "module_type",
+        "module_orientation",
+        "arrangement_rows",
+        "arrangement_columns",
+        "foundation_type",
+        "pile_embedment_depth_mm",
+        "tilt_angle_deg",
+        "ground_clearance_mm"
+      ],
+      "properties": {
+        "mounting_type": {
+          "enum": ["Single post", "Dual post", "Multi post", "Others", null],
+          "description": "支架形式。第 2 节 Mounting Type，表单域 Mounting type。"
+        },
+        "module_length_mm": {
+          "type": ["number", "null"],
+          "description": "组件长度，单位 mm。第 3 节 L*W*H 的 L，表单域 L。"
+        },
+        "module_width_mm": {
+          "type": ["number", "null"],
+          "description": "组件宽度，单位 mm。L*W*H 的 W，表单域 Text1。"
+        },
+        "module_thickness_mm": {
+          "type": ["number", "null"],
+          "description": "组件厚度，单位 mm。L*W*H 的 H，表单域 Text2。"
+        },
+        "module_weight_kg": {
+          "type": ["number", "null"],
+          "description": "组件重量，单位 kg。第 3 节 Weight，表单域 Text4。"
+        },
+        "module_power_wp": {
+          "type": ["number", "null"],
+          "description": "组件功率，单位 Wp。第 3 节 Module Power，表单域 Power。"
+        },
+        "modules_per_string": {
+          "type": ["number", "null"],
+          "description": "每串组件数。第 3 节 Modules per String，表单域 Text8。"
+        },
+        "module_type": {
+          "enum": ["Mono-facial", "Bifacial", null],
+          "description": "组件类型。第 3 节 Module Type，表单域 Dropdown2。"
+        },
+        "module_orientation": {
+          "enum": ["Portrait", "Landscape", null],
+          "description": "组件朝向。第 3 节 Orientation，表单域 Portrait。两个单选都未选时为 null。"
+        },
+        "arrangement_rows": {
+          "type": ["number", "null"],
+          "description": "组件布置行数。第 3 节 Module arrangement 的 Row，表单域 string number。"
+        },
+        "arrangement_columns": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "组件布置列数，按表单原文保留。第 3 节 Column，表单域 Text6。允许 11/22 这种未拆开的写法。"
+        },
+        "foundation_type": {
+          "enum": ["Ramming Pile", "Concrete Pile", "Screw Pile", "PHC Pipe Pile", null],
+          "description": "基础类型。第 5 节 Foundation Type，表单域 Foundation Type。"
+        },
+        "pile_embedment_depth_mm": {
+          "type": ["number", "null"],
+          "description": "桩入土深度，单位 mm。第 5 节 Pile Embedment Depth，表单域 Pile Depth in the soil。只读表单域，不读取批注。"
+        },
+        "tilt_angle_deg": {
+          "type": ["number", "null"],
+          "description": "组件倾角，单位 °。第 5 节 Tilt Angle，表单域 tilt。"
+        },
+        "ground_clearance_mm": {
+          "type": ["number", "null"],
+          "description": "组件下沿离地高度，单位 mm。第 5 节 Clearance From The Bottom Of The Panel To The Ground，表单域 Text3。"
+        }
+      }
+    },
+    "materials": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "资料表第 7 节。属性必须全部出现，空白为 null。",
+      "required": ["corrosion_category"],
+      "properties": {
+        "corrosion_category": {
+          "enum": ["C1", "C2", "C3", "C4", "C5", null],
+          "description": "大气腐蚀等级，ISO 9223。第 7 节 Atmospheric Corrosion Cateogry，表单域 Group16。按 C1–C5 标签取值，不使用单选导出值。"
+        }
+      }
+    },
+    "documents": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "资料表第 8 节 Other Documents Input。true 表示已勾选提供，false 表示未勾选，null 表示未能识别该勾选框。",
+      "required": [
+        "module_datasheet",
+        "layout",
+        "site_geological_plan",
+        "pull_out_test_report",
+        "topographic_drawing",
+        "cable_route_plan"
+      ],
+      "properties": {
+        "module_datasheet": {
+          "type": ["boolean", "null"],
+          "description": "组件规格书 Module Datasheet，表单域 Check Box1。"
+        },
+        "layout": {
+          "type": ["boolean", "null"],
+          "description": "布置图 Layout，表单域 Check Box2。"
+        },
+        "site_geological_plan": {
+          "type": ["boolean", "null"],
+          "description": "场地地质平面 Site Geological Plan，表单域 Check Box3。"
+        },
+        "pull_out_test_report": {
+          "type": ["boolean", "null"],
+          "description": "拉拔试验报告 Pull Out Test Report，表单域 Check Box4。"
+        },
+        "topographic_drawing": {
+          "type": ["boolean", "null"],
+          "description": "地形图 Topographic Drawing，表单域 Check Box5。"
+        },
+        "cable_route_plan": {
+          "type": ["boolean", "null"],
+          "description": "电缆路由图 Cable Route Plan，表单域 Check Box6。"
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "unit", "status"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": {},
+        "unit": { "type": "string" },
+        "status": { "enum": ["extracted", "assumed", "confirmed"] },
+        "source": { "type": "string", "description": "出处，如资料页码或规范条款。" }
+      }
+    }
+  }
+}
