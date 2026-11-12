@@ -14,9 +14,18 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from agent.activity import (
+    EXTRACT_RUNNING,
+    THINKING,
+    UPDATE_RUNNING,
+    activity_for_tool,
+    tool_names_from_chunk,
+)
 from agent.beam_layout import layout_view
 from agent.extract import ExtractionError, extract_project_materials
+from agent.cad_request import answer_cad_request, resolve_cad_intent
 from agent.intent import (
+    CAD,
     CHAT,
     DESIGN,
     EXTRACT,
@@ -35,6 +44,7 @@ from agent.load_check import (
     resolve_load_follow_up,
     resolve_parameter_edit,
 )
+from agent.praise import take_praise, wants_creator_praise
 from agent.chat import (
     build_model,
     chunk_text,
@@ -307,7 +317,7 @@ async def chat(body: ChatRequest, request: Request):
             logger.exception("intent classification failed")
             intent = "chat"
         logger.info("intent %s", intent)
-        if intent in LOAD_INTENTS or intent in (CHAT, UPDATE, DESIGN, INQUIRE, SAP):
+        if intent in LOAD_INTENTS or intent in (CHAT, UPDATE, DESIGN, INQUIRE, SAP, CAD):
             history = store.get(conversation_id)
             prior = history["messages"] if history else []
             intent = resolve_load_follow_up(intent, prior)
@@ -315,6 +325,7 @@ async def chat(body: ChatRequest, request: Request):
             intent = resolve_design_intent(intent, text, prior)
             intent = resolve_project_inquiry(intent, text)
             intent = resolve_sap_intent(intent, text, prior)
+            intent = resolve_cad_intent(intent, text, prior)
             logger.info("intent after follow-up %s", intent)
         if intent == EXTRACT:
             async for piece in _extraction_events(
@@ -349,6 +360,10 @@ async def chat(body: ChatRequest, request: Request):
             async for piece in _line_model_events(conversation_id, summary):
                 yield piece
             return
+        if intent == CAD:
+            async for piece in _cad_events(conversation_id, summary):
+                yield piece
+            return
         parts: list[str] = []
         try:
             yield _sse({"type": "meta", "conversation": summary})
@@ -364,17 +379,20 @@ async def chat(body: ChatRequest, request: Request):
                 project_facts=facts,
             )
             try:
-                async for piece in _stream(settings, messages, request):
-                    parts.append(piece)
-                    yield _sse({"type": "delta", "text": piece})
+                async for piece in _model_events(settings, messages, request, parts):
+                    yield piece
             except Exception as exc:
                 if parts or not _thinking_rejected(exc):
                     raise
                 logger.info("thinking 开关未被接受，改为默认模式重试")
-                async for piece in _stream(settings, messages, request, disable_thinking=False):
-                    parts.append(piece)
-                    yield _sse({"type": "delta", "text": piece})
+                async for piece in _model_events(settings, messages, request, parts, disable_thinking=False):
+                    yield piece
             answer = "".join(parts).strip()
+            if wants_creator_praise(text):
+                praise = take_praise(DATA_DIR / "creator_praise.json")
+                extra = f"\n\n{praise}" if answer else praise
+                answer = f"{answer}{extra}".strip()
+                yield _sse({"type": "delta", "text": extra})
             if answer:
                 store.append_assistant(conversation_id, answer)
             if await request.is_disconnected():
@@ -405,6 +423,7 @@ async def _extraction_events(
 ):
     try:
         yield _sse({"type": "meta", "conversation": summary})
+        yield _sse({"type": "status", "text": EXTRACT_RUNNING})
         try:
             answer, wrote = await asyncio.to_thread(extract_project_materials, store, project_id)
         except ExtractionError as exc:
@@ -413,6 +432,7 @@ async def _extraction_events(
             logger.exception("extract failed")
             answer, wrote = "资料没有提取出来。", False
         if wrote:
+            yield _sse({"type": "status", "text": THINKING})
             answer = await _friendly_answer(settings, user_text, summary, answer)
         store.append_assistant(conversation_id, answer)
         yield _sse({"type": "delta", "text": answer})
@@ -448,6 +468,7 @@ async def _friendly_answer(settings, user_text: str, summary: dict, fallback: st
 
 async def _parameter_events(conversation_id: str, summary: dict):
     yield _sse({"type": "meta", "conversation": summary})
+    yield _sse({"type": "status", "text": UPDATE_RUNNING})
     history = store.get(conversation_id)
     messages = history["messages"] if history else []
     project_name = str(summary.get("project_name") or "")
@@ -472,15 +493,21 @@ async def _sap_events(conversation_id: str, summary: dict, confirmed: bool = Fal
     history = store.get(conversation_id)
     messages = history["messages"] if history else []
     project_name = str(summary.get("project_name") or "")
+    sink: dict = {}
     try:
-        answer, wrote, show_layout, needs_dialog = await asyncio.to_thread(
+        async for text in _drive(
             answer_sap_request,
-            _design_case_text(project_name),
-            project_name,
-            messages,
-            _design_case_path(project_name),
-            confirmed,
-        )
+            (
+                _design_case_text(project_name),
+                project_name,
+                messages,
+                _design_case_path(project_name),
+                confirmed,
+            ),
+            sink,
+        ):
+            yield _sse({"type": "status", "text": text})
+        answer, wrote, show_layout, needs_dialog = sink["result"]
     except Exception:
         logger.exception("sap request failed")
         answer, wrote, show_layout, needs_dialog = "SAP2000 没有调用。", False, False, False
@@ -499,15 +526,21 @@ async def _load_events(conversation_id: str, summary: dict, intent: str):
     history = store.get(conversation_id)
     messages = history["messages"] if history else []
     project_name = str(summary.get("project_name") or "")
+    sink: dict = {}
     try:
-        answer, wrote = await asyncio.to_thread(
+        async for text in _drive(
             answer_load_request,
-            intent,
-            _design_case_text(project_name),
-            project_name,
-            messages,
-            _design_case_path(project_name),
-        )
+            (
+                intent,
+                _design_case_text(project_name),
+                project_name,
+                messages,
+                _design_case_path(project_name),
+            ),
+            sink,
+        ):
+            yield _sse({"type": "status", "text": text})
+        answer, wrote = sink["result"]
     except Exception:
         logger.exception("load check failed")
         answer, wrote = "荷载没有算成。", False
@@ -516,19 +549,52 @@ async def _load_events(conversation_id: str, summary: dict, intent: str):
     yield _sse({"type": "done", "refresh_files": wrote})
 
 
+async def _cad_events(conversation_id: str, summary: dict):
+    yield _sse({"type": "meta", "conversation": summary})
+    history = store.get(conversation_id)
+    messages = history["messages"] if history else []
+    project_name = str(summary.get("project_name") or "")
+    sink: dict = {}
+    try:
+        async for text in _drive(
+            answer_cad_request,
+            (
+                _design_case_text(project_name),
+                project_name,
+                messages,
+                _design_case_path(project_name),
+            ),
+            sink,
+        ):
+            yield _sse({"type": "status", "text": text})
+        answer, wrote, show_layout = sink["result"]
+    except Exception:
+        logger.exception("cad drawing failed")
+        answer, wrote, show_layout = "CAD 图纸没有画成。", False, False
+    store.append_assistant(conversation_id, answer)
+    yield _sse({"type": "delta", "text": answer})
+    yield _sse({"type": "done", "refresh_files": wrote, "refresh_layout": show_layout})
+
+
 async def _line_model_events(conversation_id: str, summary: dict):
     yield _sse({"type": "meta", "conversation": summary})
     history = store.get(conversation_id)
     messages = history["messages"] if history else []
     project_name = str(summary.get("project_name") or "")
+    sink: dict = {}
     try:
-        answer, wrote, show_layout = await asyncio.to_thread(
+        async for text in _drive(
             answer_line_model,
-            _design_case_text(project_name),
-            project_name,
-            messages,
-            _design_case_path(project_name),
-        )
+            (
+                _design_case_text(project_name),
+                project_name,
+                messages,
+                _design_case_path(project_name),
+            ),
+            sink,
+        ):
+            yield _sse({"type": "status", "text": text})
+        answer, wrote, show_layout = sink["result"]
     except Exception:
         logger.exception("line model failed")
         answer, wrote, show_layout = "支架线模没有布置出来。", False, False
@@ -554,14 +620,63 @@ def _design_case_text(project_name: str) -> str | None:
         return None
 
 
+async def _model_events(settings, messages, request: Request, parts: list[str], *, disable_thinking: bool = True):
+    async for kind, payload in _stream(settings, messages, request, disable_thinking=disable_thinking):
+        if kind == "status":
+            yield _sse({"type": "status", "text": payload})
+            continue
+        parts.append(payload)
+        yield _sse({"type": "delta", "text": payload})
+
+
 async def _stream(settings, messages, request: Request, *, disable_thinking: bool = True):
     model = build_model(settings, disable_thinking=disable_thinking)
+    announced: set[str] = set()
     async for chunk in model.astream(messages):
         if await request.is_disconnected():
             break
+        for name in tool_names_from_chunk(chunk):
+            label = activity_for_tool(name)
+            if label and label not in announced:
+                announced.add(label)
+                yield "status", label
         piece = chunk_text(chunk)
         if piece:
-            yield piece
+            yield "text", piece
+
+
+async def _drive(fn, args: tuple, sink: dict):
+    """在线程里跑计算，并把线程里报告的进度交给调用方。"""
+    from agent.activity import bind_activity, reset_activity
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    def report(text: str) -> None:
+        if text:
+            loop.call_soon_threadsafe(queue.put_nowait, text)
+
+    def wrapped():
+        token = bind_activity(report)
+        try:
+            return fn(*args)
+        finally:
+            reset_activity(token)
+
+    task = asyncio.create_task(asyncio.to_thread(wrapped))
+    try:
+        while not task.done():
+            try:
+                yield await asyncio.wait_for(queue.get(), 0.1)
+            except TimeoutError:
+                continue
+        await asyncio.sleep(0)
+        while not queue.empty():
+            yield queue.get_nowait()
+        sink["result"] = task.result()
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 def _thinking_rejected(exc: Exception) -> bool:

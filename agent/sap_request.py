@@ -1,5 +1,6 @@
 """调用 SAP2000 之前，先核对荷载和线模。
 
+已有计算结果、用户又不是要求重算时，直接展示那次结果。
 两样都还没有时，先按已有规则计算，再请用户确认。
 条件不够就指出缺哪一项，不补一个数。
 确认之前不调用 SAP2000。
@@ -10,9 +11,11 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent.activity import SAP_RUNNING, report_activity
 from agent.beam_layout import layout_view
 from agent.intent import LOADS, SAP
 from agent.line_model import answer_line_model
@@ -20,10 +23,21 @@ from agent.load_check import answer_load_request, collect_updates
 from agent.settings import ROOT
 
 _ASKS_MEANING = re.compile(
-    r"(什么是|啥是|何谓|含义|意思).{0,12}(SAP\s*2000|内力)|(SAP\s*2000|内力).{0,12}(什么意思|含义)",
+    r"(什么是|啥是|何谓|含义|意思).{0,12}(SAP\s*2000|内力|应力比|力学)"
+    r"|(SAP\s*2000|内力|应力比).{0,12}(什么意思|含义)",
     re.IGNORECASE,
 )
 _WANTS_SAP = re.compile(r"SAP\s*2000|结构计算|计算内力|算内力", re.IGNORECASE)
+_WANTS_RESULTS = re.compile(
+    r"(查看|看看|看一下|看下|展示|显示|列出|给我看).{0,24}(计算结果|计算的结果|应力比|内力|力学)"
+    r"|应力比|力学(计算)?结果|结构计算结果|内力结果"
+)
+_WANTS_RECALC = re.compile(
+    r"重新\s*(进行\s*)?(力学\s*)?(计算|算|调用|跑|运行|分析)"
+    r"|再\s*(算|计算|调用|跑|运行)(?:\s*(一次|一遍))?"
+    r"|重算"
+)
+_STRUCTURAL = re.compile(r"力学|结构|内力|应力|SAP", re.IGNORECASE)
 _CONFIRM = re.compile(r"确认|可以调用|开始调用|调用吧|同意")
 _ARRANGEMENT = re.compile(r"布置列数")
 _LINE_KEYS = {
@@ -42,9 +56,23 @@ def wants_sap(text: str) -> bool:
     return _WANTS_SAP.search(text) is not None
 
 
+def wants_saved_results(text: str) -> bool:
+    """这句话是在看已有的力学或结构计算结果。"""
+    if _ASKS_MEANING.search(text):
+        return False
+    return _WANTS_RESULTS.search(text) is not None
+
+
+def wants_recalculate(text: str) -> bool:
+    """用户明确要求重新做力学计算。"""
+    if _ASKS_MEANING.search(text):
+        return False
+    return _WANTS_RECALC.search(text) is not None
+
+
 def resolve_sap_intent(intent: str, text: str, messages: list[dict]) -> str:
-    """点名 SAP2000、结构计算或内力时进入 SAP。上一句还在等参数或等确认时，接着做。"""
-    if wants_sap(text):
+    """点名 SAP2000、结构计算、内力，或要看已有结果时进入 SAP。上一句还在等参数或等确认时，接着做。"""
+    if wants_sap(text) or wants_saved_results(text) or _explicit_structural_recalc(text):
         return SAP
     previous = _previous_assistant(messages)
     if previous.startswith(_BLOCKED) and (_supplies(text) or intent == SAP):
@@ -64,6 +92,27 @@ def answer_sap_request(
     confirmed: bool = False,
 ) -> tuple[str, bool, bool, bool]:
     """返回 (说明, 是否写入了文件, 是否可以打开布置图, 是否要弹出确认对话框)。"""
+    latest = _latest_user(messages)
+    reading = not confirmed and not wants_recalculate(latest) and not _confirming(messages)
+    if reading:
+        saved = _saved_report(path, case_text)
+        if saved is not None:
+            return saved, False, False, False
+    note_missing = reading and wants_saved_results(latest)
+    reply, wrote, show, dialog = _answer_new_sap(case_text, project_name, messages, path, confirmed)
+    if note_missing:
+        lead = "已有的 SAP2000 结果读不出来。" if _result_exists(path) else "还没有 SAP2000 计算结果。"
+        reply = f"{lead}\n{reply}"
+    return reply, wrote, show, dialog
+
+
+def _answer_new_sap(
+    case_text: str | None,
+    project_name: str,
+    messages: list[dict],
+    path: Path | None,
+    confirmed: bool,
+) -> tuple[str, bool, bool, bool]:
     latest = _latest_user(messages)
     updates = collect_updates(latest)
     line_path = None if path is None else path.parent / "line_model.json"
@@ -146,6 +195,7 @@ def _call(case_text: str | None, path: Path | None) -> tuple[str, bool]:
     work_dir = path.parent / "SAP2000" if path is not None else package_root / "sap2000" / "templates"
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
+        report_activity(SAP_RUNNING)
         result, design = run_design(case, loads, work_dir)
     except Exception as exc:
         return f"SAP2000 没有完成计算。{exc}", False
@@ -154,6 +204,74 @@ def _call(case_text: str | None, path: Path | None) -> tuple[str, bool]:
             destination = path.parent / name
             destination.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
     return report(result, str(program), design), True
+
+
+def _explicit_structural_recalc(text: str) -> bool:
+    """重新计算风或雪时不要改道到 SAP。没点明力学、结构、内力、应力或 SAP 时，也不改道。"""
+    if not wants_recalculate(text):
+        return False
+    if not _STRUCTURAL.search(text):
+        return False
+    if re.search(r"风|雪", text) and "荷载" in text:
+        return False
+    return True
+
+
+def _confirming(messages: list[dict]) -> bool:
+    """上一句正在等确认，而这句是在确认，就继续去调用，不要改成展示旧结果。"""
+    if _HOLD not in _previous_assistant(messages):
+        return False
+    return _confirms(_latest_user(messages))
+
+
+def _result_exists(path: Path | None) -> bool:
+    return path is not None and (path.parent / "analysis_result.json").is_file()
+
+
+def _saved_report(path: Path | None, case_text: str | None) -> str | None:
+    """读得出现成的分析结果时，返回带计算时间的说明。读不出来时返回 None。"""
+    if path is None:
+        return None
+    result_path = path.parent / "analysis_result.json"
+    design_path = path.parent / "section_design.json"
+    result = _read_json(result_path)
+    design = _read_json(design_path)
+    if not isinstance(result, dict) or not isinstance(design, dict):
+        return None
+    members = result.get("members")
+    if not isinstance(members, list) or not members:
+        return None
+    if not isinstance(design.get("members"), list) or not design.get("members"):
+        return None
+    try:
+        stamp = datetime.fromtimestamp(result_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        return None
+    package_root = ROOT / "subsystems" / "loads_sap2000"
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+    from sap2000.model import report
+
+    try:
+        body = report(result, "SAP2000", design)
+    except (KeyError, TypeError, ValueError):
+        return None
+    lines = [
+        f"已有 SAP2000 计算结果，计算时间是 {stamp}。这次没有重新调用 SAP2000。",
+    ]
+    line_path = path.parent / "line_model.json"
+    if not _line_current(case_text, line_path) or _loads_newer(path, result_path):
+        lines.append("线模或荷载在这次计算之后有改动。要按新的输入重算，请说明重新计算。")
+    lines.extend(["", body])
+    return "\n".join(lines)
+
+
+def _loads_newer(case_path: Path, result_path: Path) -> bool:
+    loads = case_path.parent / "loads.json"
+    try:
+        return loads.stat().st_mtime > result_path.stat().st_mtime + 1
+    except OSError:
+        return False
 
 
 def _line_current(case_text: str | None, line_path: Path | None) -> bool:

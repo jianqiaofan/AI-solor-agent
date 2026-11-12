@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agent.activity import LAYOUT_RUNNING, report_activity
 from agent.beam_layout import layout_view, parse_counts
 from agent.case_edit import persist_updates
 from agent.intent import CHAT, DESIGN, EXTRACT, LOADS, SAP, SNOW, UPDATE, WIND
@@ -75,6 +76,7 @@ def answer_line_model(
     geometry = case.get("geometry")
     if not isinstance(geometry, dict):
         return _with_saved(saved, "还不能设计支架线模。设计案例里没有几何参数。"), wrote, False
+    report_activity(LAYOUT_RUNNING)
     view = layout_view(geometry)
     if not view.get("ready"):
         reason = str(view.get("message") or "几何参数还不够。")

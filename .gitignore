@@ -5,6 +5,9 @@ venv/
 .pytest_cache/
 .env
 
+# 本机 Python 路径。每台电脑各自保留，git pull 不覆盖
+pythonw.local.bat
+
 # 设计助手的本地对话和运行日志
 agent/data/
 

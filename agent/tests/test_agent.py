@@ -14,6 +14,7 @@ from agent.chat import chunk_text, explain, resolve_model, rewrite_extraction_re
 from agent.load_tools import run_load_tool, stream_with_load_tools
 from agent.extract import ExtractionError, extract_project_materials
 from agent.intent import (
+    CAD,
     CHAT,
     DESIGN,
     EXTRACT,
@@ -170,16 +171,19 @@ class StoreTests(unittest.TestCase):
             (results / "子目录" / "计算书.docx").write_bytes(b"doc")
             (results / "~$说明.pdf").write_bytes(b"lock")
             listed = store.list_workspace(project["id"])
-            names = [item["name"] for item in listed["folders"][1]["files"]]
+            files = listed["folders"][1]["files"]
             self.assertEqual(listed["folders"][0]["files"], [])
-            self.assertEqual(names, ["子目录/计算书.docx", "说明.pdf"])
+            self.assertEqual([item["name"] for item in files], ["子目录", "说明.pdf"])
+            self.assertEqual(files[0]["children"][0]["name"], "计算书.docx")
+            self.assertNotIn("/", files[0]["children"][0]["name"])
             (results / "SAP2000").mkdir()
             (results / "SAP2000" / "model.sdb").write_bytes(b"sdb")
             (results / "SAP2000" / "model.LOG").write_bytes(b"log")
-            names = [item["name"] for item in store.list_workspace(project["id"])["folders"][1]["files"]]
-            self.assertEqual(names, ["SAP2000", "子目录/计算书.docx", "说明.pdf"])
-            sap = next(item for item in store.list_workspace(project["id"])["folders"][1]["files"] if item["name"] == "SAP2000")
+            files = store.list_workspace(project["id"])["folders"][1]["files"]
+            self.assertEqual([item["name"] for item in files], ["SAP2000", "子目录", "说明.pdf"])
+            sap = next(item for item in files if item["name"] == "SAP2000")
             self.assertTrue(sap["directory"])
+            self.assertEqual([item["name"] for item in sap["children"]], ["model.LOG", "model.sdb"])
             self.assertTrue(store.resolve_workspace_file(project["id"], sap["path"], allow_directory=True).is_dir())
             target = store.resolve_workspace_file(project["id"], "projects/甲项目/成果/说明.pdf")
             self.assertEqual(target.name, "说明.pdf")
@@ -249,6 +253,7 @@ class ExtractionIntentTests(unittest.TestCase):
         self.assertEqual(parse_intent('{"intent":"update_parameters"}'), UPDATE)
         self.assertEqual(parse_intent('{"intent":"design_line_model"}'), DESIGN)
         self.assertEqual(parse_intent('{"intent":"run_sap2000"}'), SAP)
+        self.assertEqual(parse_intent('{"intent":"draw_cad"}'), CAD)
         self.assertEqual(parse_intent('{"intent":"inquire_project"}'), INQUIRE)
         self.assertEqual(parse_intent("今天天气怎么样"), CHAT)
         self.assertEqual(parse_intent('{"intent":"other"}'), CHAT)

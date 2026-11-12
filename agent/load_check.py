@@ -8,8 +8,9 @@ from typing import Any
 
 from pathlib import Path
 
+from agent.activity import load_activity, report_activity
 from agent.case_edit import persist_updates
-from agent.intent import CHAT, DESIGN, EXTRACT, LOADS, SAP, SNOW, UPDATE, WIND
+from agent.intent import CAD, CHAT, DESIGN, EXTRACT, LOADS, SAP, SNOW, UPDATE, WIND
 from agent.load_tools import run_load_tool
 
 _ASCE = "USA(ASCE7-16)"
@@ -113,7 +114,7 @@ def supplies_load_parameter(text: str) -> bool:
 
 def resolve_parameter_edit(intent: str, text: str) -> str:
     """没在算荷载，但这句话是在改计算参数，就去写 design_case.json。"""
-    if intent in (WIND, SNOW, LOADS, EXTRACT, DESIGN, SAP):
+    if intent in (WIND, SNOW, LOADS, EXTRACT, DESIGN, SAP, CAD):
         return intent
     if not collect_updates(text):
         # 分类器当成改参数，但这句话对不上已有字段时，交回带历史的对话。
@@ -201,6 +202,8 @@ def answer_load_request(
         lines.append("请补充这些参数。补全之前不会调用对应的荷载工具。")
         blocks.append("\n".join(lines))
     results: list[dict[str, Any]] = []
+    if calls:
+        report_activity(load_activity([name for name, _kwargs in calls]))
     for name, kwargs in calls:
         payload = run_load_tool(name, kwargs, code)
         if "error" in payload:
@@ -536,36 +539,54 @@ def _format_results(results: list[dict[str, Any]]) -> str:
     for result in results:
         action = result.get("action")
         if action == "dead":
-            lines = ["组件自重："]
+            title = "组件自重"
         else:
-            title = "风荷载" if action == "wind" else "雪荷载"
-            lines = [f"{result.get('code')} {title}："]
+            kind = "风荷载" if action == "wind" else "雪荷载"
+            title = f"{result.get('code')} {kind}"
         cases = result.get("cases") or []
-        if result.get("action") == "wind":
-            lines.extend(_wind_reply_lines(cases))
-        else:
-            for case in cases:
-                lines.append(f"- {case['name']}：{case['value']} {case['unit']}")
+        rows = _wind_rows(cases) if action == "wind" else [
+            (str(item["name"]), f"{item['value']} {item['unit']}") for item in cases
+        ]
+        lines = [f"### {title}", "", *_result_table(rows)]
         assumptions = result.get("assumptions") or []
         if assumptions:
-            lines.append("计算中采用的规定：")
+            lines.extend(["", "计算中采用的规定："])
             lines.extend(f"- {item}" for item in assumptions)
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
 
-def _wind_reply_lines(cases: list[dict[str, Any]]) -> list[str]:
+def _result_table(rows: list[tuple[str, str]]) -> list[str]:
+    return _markdown_table(("项目", "结果"), ("---", "---:"), rows)
+
+
+def _markdown_table(
+    headers: tuple[str, ...],
+    align: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+) -> list[str]:
+    def line(cells: tuple[str, ...]) -> str:
+        return "| " + " | ".join(_table_cell(item) for item in cells) + " |"
+
+    return [line(headers), line(align), *(line(row) for row in rows)]
+
+
+def _table_cell(value: Any) -> str:
+    return str(value).replace("|", "/").replace("\n", " ").strip()
+
+
+def _wind_rows(cases: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """速度风压照原样列出。每个倾角的板面风压只留最大正值和最大负值。"""
-    lines: list[str] = []
+    rows: list[tuple[str, str]] = []
     by_tilt: dict[int, list[tuple[float, str]]] = {}
     for case in cases:
         case_id = str(case.get("id") or "")
         if case_id.startswith(("W_QP_", "W_QH_")):
-            lines.append(f"- {case['name']}：{case['value']} {case['unit']}")
+            rows.append((str(case["name"]), f"{case['value']} {case['unit']}"))
             continue
         tilt = _tilt_of(case_id)
         if tilt is None:
-            lines.append(f"- {case['name']}：{case['value']} {case['unit']}")
+            rows.append((str(case["name"]), f"{case['value']} {case['unit']}"))
             continue
         by_tilt.setdefault(tilt, []).append((float(case["value"]), str(case.get("unit") or "")))
     for tilt in sorted(by_tilt):
@@ -574,10 +595,10 @@ def _wind_reply_lines(cases: list[dict[str, Any]]) -> list[str]:
         positive = [value for value, _unit in values if value > 0]
         negative = [value for value, _unit in values if value < 0]
         if positive:
-            lines.append(f"- 板面风压（{tilt}°，最大正风压）：{max(positive)} {unit}")
+            rows.append((f"板面风压（{tilt}°，最大正风压）", f"{max(positive)} {unit}"))
         if negative:
-            lines.append(f"- 板面风压（{tilt}°，最大负风压）：{min(negative)} {unit}")
-    return lines
+            rows.append((f"板面风压（{tilt}°，最大负风压）", f"{min(negative)} {unit}"))
+    return rows
 
 
 def _tilt_of(case_id: str) -> int | None:

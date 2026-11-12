@@ -68,7 +68,7 @@ def beam_line_cases(
 def summary_lines(area_cases: list[dict[str, Any]], length_mm: float) -> list[str]:
     """给确认用的线荷载摘要。风压只保留每个倾角的最大正值和最大负值。"""
     length_m = length_mm / 1000.0
-    direct: list[str] = []
+    direct: list[tuple[str, float]] = []
     wind: dict[int, list[float]] = {}
     for item in area_cases:
         if not is_module_area_load(item):
@@ -77,25 +77,33 @@ def summary_lines(area_cases: list[dict[str, Any]], length_mm: float) -> list[st
         case_id = str(item.get("id") or "")
         tilt = _tilt_of(case_id)
         if tilt is None:
-            direct.append(f"- {item['name']}线荷载：{value} kN/m")
+            direct.append((str(item["name"]), value))
             continue
         wind.setdefault(tilt, []).append(value)
     if not direct and not wind:
         return []
-    lines = [
-        f"主梁线荷载 = 面荷载 × 组件长度 {length_m:g} m。"
-        "组件长度方向的中线与主梁轴线对齐。"
-    ]
-    lines.extend(direct)
+    rows = [(name, f"{value} kN/m") for name, value in direct]
     for tilt in sorted(wind):
         values = wind[tilt]
         positive = [item for item in values if item > 0]
         negative = [item for item in values if item < 0]
         if positive:
-            lines.append(f"- 板面风压（{tilt}°，最大正风压）线荷载：{max(positive)} kN/m")
+            rows.append((f"板面风压（{tilt}°，最大正风压）", f"{max(positive)} kN/m"))
         if negative:
-            lines.append(f"- 板面风压（{tilt}°，最大负风压）线荷载：{min(negative)} kN/m")
-    return lines
+            rows.append((f"板面风压（{tilt}°，最大负风压）", f"{min(negative)} kN/m"))
+    return [
+        f"主梁线荷载 = 面荷载 × 组件长度 {length_m:g} m。"
+        "组件长度方向的中线与主梁轴线对齐。",
+        "",
+        *_markdown_table(("项目", "线荷载"), rows),
+    ]
+
+
+def _markdown_table(headers: tuple[str, str], rows: list[tuple[str, str]]) -> list[str]:
+    def line(cells: tuple[str, ...]) -> str:
+        return "| " + " | ".join(str(item).replace("|", "/").replace("\n", " ") for item in cells) + " |"
+
+    return [line(headers), line(("---", "---:")), *(line(row) for row in rows)]
 
 
 def _tilt_of(case_id: str) -> int | None:

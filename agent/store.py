@@ -124,37 +124,40 @@ class Store:
             folder = (root / folder_name).resolve()
             files: list[dict] = []
             if folder.is_dir() and _is_inside(folder, root):
-                self._append_workspace_files(folder, folder, root, files)
+                files = self._workspace_tree(folder, folder, root, [200])
             folders.append({"name": folder_name, "files": files})
         return {"path": relative, "folders": folders}
 
-    def _append_workspace_files(
+    def _workspace_tree(
         self,
         folder: Path,
         top: Path,
         root: Path,
-        files: list[dict],
-    ) -> None:
-        if len(files) >= 200:
-            return
-        for item in sorted(folder.iterdir(), key=lambda path: path.name):
+        budget: list[int],
+    ) -> list[dict]:
+        entries: list[dict] = []
+        try:
+            children = sorted(folder.iterdir(), key=lambda path: (not path.is_dir(), path.name))
+        except OSError:
+            return entries
+        for item in children:
+            if budget[0] <= 0:
+                break
             if item.name.startswith("~$") or item.name.endswith(".uploading"):
                 continue
             resolved = item.resolve()
             if not _is_inside(resolved, root):
                 continue
-            if item.is_dir() and item.name in {"sap", "SAP2000"} and folder == top:
-                record = self._file_record(item, top)
-                record["directory"] = True
-                files.append(record)
+            if not item.is_dir() and not item.is_file():
                 continue
+            budget[0] -= 1
+            record = self._file_record(item, top)
+            record["name"] = item.name
             if item.is_dir():
-                self._append_workspace_files(item, top, root, files)
-                continue
-            if item.is_file():
-                files.append(self._file_record(item, top))
-            if len(files) >= 200:
-                return
+                record["directory"] = True
+                record["children"] = self._workspace_tree(item, top, root, budget)
+            entries.append(record)
+        return entries
 
     def _file_record(self, item: Path, top: Path) -> dict:
         resolved = item.resolve()

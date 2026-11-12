@@ -51,9 +51,9 @@ def test_summary_keeps_only_the_extreme_wind_line_loads() -> None:
     )
     text = "\n".join(lines)
     assert "组件长度 1 m" in text
-    assert "组件自重线荷载：0.1 kN/m" in text
-    assert "最大正风压）线荷载：1.2 kN/m" in text
-    assert "最大负风压）线荷载：-0.7 kN/m" in text
+    assert "| 组件自重 | 0.1 kN/m |" in text
+    assert "| 板面风压（0°，最大正风压） | 1.2 kN/m |" in text
+    assert "| 板面风压（0°，最大负风压） | -0.7 kN/m |" in text
     assert "qp" not in text
 
 

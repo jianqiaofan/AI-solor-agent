@@ -14,6 +14,7 @@ LOADS = "calculate_loads"
 UPDATE = "update_parameters"
 DESIGN = "design_line_model"
 SAP = "run_sap2000"
+CAD = "draw_cad"
 INQUIRE = "inquire_project"
 CHAT = "chat"
 LOAD_INTENTS = (WIND, SNOW, LOADS)
@@ -56,6 +57,9 @@ _PROMPT = (
     "既要改参数又要计算时，按要计算的那一种输出。"
     "要调用 SAP2000、做结构计算或计算内力时，"
     '输出 {"intent":"run_sap2000"}。'
+    "要查看或展示已经算好的力学结果、结构计算结果、应力比或内力时，"
+    '也输出 {"intent":"run_sap2000"}。'
+    "这是在看已有结果。用户明确说重新力学计算、重新计算内力或重新调用 SAP2000 时，同样输出这一项。"
     "没有线模或荷载时也按这一项输出，不要改成只算荷载或只出线模。"
     "只算风、雪或荷载，没有要求 SAP2000、结构计算或内力时，不要输出 run_sap2000。"
     "既要提取又要调用 SAP2000 时，按提取输出。"
@@ -64,6 +68,12 @@ _PROMPT = (
     "这一步只布置线模。选截面、加荷载、运行 SAP2000 和出计算书都不要当成这一项。"
     "既要提取又要设计时，按提取输出。既要计算荷载又要设计时，按要计算的那一种输出。"
     "既要改参数又要设计时，按设计输出。"
+    "要生成 CAD 图纸、打开 CAD，或把线模画到图纸上时，"
+    '输出 {"intent":"draw_cad"}。'
+    "这一步只打开 CAD，画出线模并标注尺寸。没有线模时仍按这一项输出，不要改成设计线模。"
+    "只问 CAD 或图纸的含义、还没让画时，不要输出 draw_cad。"
+    "既要提取又要出图时，按提取输出。既要计算荷载又要出图时，按要计算的那一种输出。"
+    "既要调用 SAP2000 又要出图时，按 SAP2000 输出。既要设计线模又要出图时，按出图输出。"
     "用户在了解当前项目已经记下的情况，例如组件排布、桩的埋深、离地高度、组件尺寸、朝向，"
     "或问这个项目现在是什么情况时，"
     '输出 {"intent":"inquire_project"}。'
@@ -90,7 +100,17 @@ def parse_intent(raw: str) -> str:
         data = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return CHAT
-    if isinstance(data, dict) and data.get("intent") in (EXTRACT, WIND, SNOW, LOADS, UPDATE, DESIGN, SAP, INQUIRE):
+    if isinstance(data, dict) and data.get("intent") in (
+        EXTRACT,
+        WIND,
+        SNOW,
+        LOADS,
+        UPDATE,
+        DESIGN,
+        SAP,
+        CAD,
+        INQUIRE,
+    ):
         return str(data["intent"])
     return CHAT
 
@@ -104,7 +124,7 @@ def asks_about_project(text: str) -> bool:
 
 def resolve_project_inquiry(intent: str, text: str) -> str:
     """了解项目情况时交给带设计案例的对话。提取、改参数、算荷载和设计优先。"""
-    if intent in LOAD_INTENTS or intent in (EXTRACT, DESIGN, UPDATE, SAP):
+    if intent in LOAD_INTENTS or intent in (EXTRACT, DESIGN, UPDATE, SAP, CAD):
         return intent
     if any(word in text for word in ("计算", "算一下", "算风", "算雪", "算荷载")):
         if intent == INQUIRE:

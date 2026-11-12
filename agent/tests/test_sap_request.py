@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.activity import SAP_RUNNING, bind_activity, reset_activity
 from agent.intent import CHAT, DESIGN, LOADS
 from agent.sap_request import answer_sap_request, resolve_sap_intent
 
@@ -89,6 +92,11 @@ class SapIntentTests(unittest.TestCase):
         self.assertEqual(resolve_sap_intent(CHAT, "计算荷载", []), CHAT)
         self.assertEqual(resolve_sap_intent(DESIGN, "设计支架", []), DESIGN)
         self.assertEqual(resolve_sap_intent(CHAT, "什么是内力", []), CHAT)
+        self.assertEqual(resolve_sap_intent(CHAT, "什么是应力比", []), CHAT)
+        self.assertEqual(resolve_sap_intent(CHAT, "查看结构计算结果", []), "run_sap2000")
+        self.assertEqual(resolve_sap_intent(CHAT, "展示应力比", []), "run_sap2000")
+        self.assertEqual(resolve_sap_intent(CHAT, "重新力学计算", []), "run_sap2000")
+        self.assertEqual(resolve_sap_intent(LOADS, "重新计算风荷载", []), LOADS)
 
     def test_follow_up_stays_on_sap(self) -> None:
         asking = [
@@ -325,3 +333,118 @@ class SapRequestTests(unittest.TestCase):
             self.assertNotIn("请先确认设计案例", called)
             self.ran.assert_called_once()
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["status"], "draft")
+
+    def test_saved_result_is_shown_with_its_time_and_sap_is_not_called(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "design_case.json"
+            path.write_text(json.dumps(_ready_case(), ensure_ascii=False), encoding="utf-8")
+            answer_sap_request(
+                path.read_text(encoding="utf-8"),
+                "甲项目",
+                [{"role": "user", "content": "调用SAP2000"}],
+                path,
+            )
+            result, design = _calculated_result()
+            result_path = path.parent / "analysis_result.json"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            (path.parent / "section_design.json").write_text(json.dumps(design), encoding="utf-8")
+            stamp = datetime.fromtimestamp(result_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            notes: list[str] = []
+            token = bind_activity(notes.append)
+            try:
+                reply, wrote, show, dialog = answer_sap_request(
+                    path.read_text(encoding="utf-8"),
+                    "甲项目",
+                    [{"role": "user", "content": "查看结构计算结果"}],
+                    path,
+                )
+            finally:
+                reset_activity(token)
+            self.assertNotIn(SAP_RUNNING, notes)
+            self.assertFalse(wrote)
+            self.assertFalse(show)
+            self.assertFalse(dialog)
+            self.assertIn(f"计算时间是 {stamp}", reply)
+            self.assertIn("这次没有重新调用 SAP2000", reply)
+            self.assertIn("### 主梁", reply)
+            self.assertIn("| B1 |", reply)
+            self.assertNotIn("线模或荷载在这次计算之后有改动", reply)
+            self.assertFalse(self.ran.called)
+            again, _wrote, _show, again_dialog = answer_sap_request(
+                path.read_text(encoding="utf-8"),
+                "甲项目",
+                [{"role": "user", "content": "调用SAP2000"}],
+                path,
+            )
+            self.assertFalse(again_dialog)
+            self.assertIn("这次没有重新调用 SAP2000", again)
+            self.assertFalse(self.ran.called)
+            later = result_path.stat().st_mtime + 5
+            os.utime(path.parent / "loads.json", (later, later))
+            stale, _wrote, _show, stale_dialog = answer_sap_request(
+                path.read_text(encoding="utf-8"),
+                "甲项目",
+                [{"role": "user", "content": "展示应力比"}],
+                path,
+            )
+            self.assertFalse(stale_dialog)
+            self.assertIn("线模或荷载在这次计算之后有改动", stale)
+            self.assertIn("| B1 |", stale)
+            self.assertFalse(self.ran.called)
+
+    def test_explicit_recalculation_still_calls_sap(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "design_case.json"
+            path.write_text(json.dumps(_ready_case(), ensure_ascii=False), encoding="utf-8")
+            answer_sap_request(
+                path.read_text(encoding="utf-8"),
+                "甲项目",
+                [{"role": "user", "content": "调用SAP2000"}],
+                path,
+            )
+            result, design = _calculated_result()
+            (path.parent / "analysis_result.json").write_text(json.dumps(result), encoding="utf-8")
+            (path.parent / "section_design.json").write_text(json.dumps(design), encoding="utf-8")
+            reply, _wrote, _show, dialog = answer_sap_request(
+                path.read_text(encoding="utf-8"),
+                "甲项目",
+                [{"role": "user", "content": "重新力学计算"}],
+                path,
+            )
+            self.assertTrue(dialog)
+            self.assertNotIn("这次没有重新调用 SAP2000", reply)
+            self.assertFalse(self.ran.called)
+            notes: list[str] = []
+            token = bind_activity(notes.append)
+            try:
+                called, called_wrote, _show, called_dialog = answer_sap_request(
+                    path.read_text(encoding="utf-8"),
+                    "甲项目",
+                    [{"role": "user", "content": "重新力学计算"}],
+                    path,
+                    True,
+                )
+            finally:
+                reset_activity(token)
+            self.assertIn(SAP_RUNNING, notes)
+            self.assertTrue(called_wrote)
+            self.assertFalse(called_dialog)
+            self.assertIn("已用 SAP2000 完成计算", called)
+            self.assertNotIn("这次没有重新调用 SAP2000", called)
+            self.ran.assert_called_once()
+
+    def test_view_without_a_saved_result_prepares_sap(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "design_case.json"
+            path.write_text(json.dumps(_ready_case(), ensure_ascii=False), encoding="utf-8")
+            reply, _wrote, _show, dialog = answer_sap_request(
+                path.read_text(encoding="utf-8"),
+                "甲项目",
+                [{"role": "user", "content": "查看结构计算结果"}],
+                path,
+            )
+            self.assertTrue(reply.startswith("还没有 SAP2000 计算结果。"))
+            self.assertTrue(dialog)
+            self.assertIn("点击确认之后才调用 SAP2000", reply)
+            self.assertFalse((path.parent / "analysis_result.json").exists())
+            self.assertFalse(self.ran.called)

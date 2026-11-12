@@ -36,6 +36,7 @@ let conversations = [];
 let activeId = null;
 let streaming = false;
 let abortController = null;
+let activeReveal = null;
 
 document.getElementById("new-project").addEventListener("click", openProjectDialog);
 document.getElementById("project-cancel").addEventListener("click", closeProjectDialog);
@@ -51,12 +52,34 @@ document.getElementById("sap-form").addEventListener("submit", confirmSap);
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   closeFileMenu();
+  closeTextMenu();
   if (!projectDialog.hidden) closeProjectDialog();
   if (!sapDialog.hidden) closeSapDialog();
 });
 document.addEventListener("click", (event) => {
   if (fileMenu && !fileMenu.hidden && !fileMenu.contains(event.target)) closeFileMenu();
+  if (textMenu && !textMenu.contains(event.target)) closeTextMenu();
 });
+inputEl.addEventListener("contextmenu", (event) => {
+  if (inputEl.disabled) return;
+  event.preventDefault();
+  const selected = inputEl.value.slice(inputEl.selectionStart, inputEl.selectionEnd);
+  openTextMenu(event.clientX, event.clientY, [
+    { label: "复制", disabled: selected.length === 0, run: () => copyPlainText(selected) },
+    { label: "粘贴", disabled: false, run: pasteIntoInput },
+  ]);
+});
+messagesEl.addEventListener("contextmenu", (event) => {
+  const message = event.target.closest(".msg.assistant .msg-text");
+  if (!message) return;
+  const selected = assistantSelection(message);
+  if (!selected) return;
+  event.preventDefault();
+  openTextMenu(event.clientX, event.clientY, [
+    { label: "复制", disabled: false, run: () => copyPlainText(selected) },
+  ]);
+});
+transcriptEl.addEventListener("scroll", closeTextMenu, { passive: true });
 newChatBtn.addEventListener("click", newConversation);
 searchEl.addEventListener("input", renderHistory);
 formEl.addEventListener("submit", onSubmit);
@@ -523,13 +546,14 @@ async function sendMessage(textOverride, options) {
   hideToast();
   welcomeEl.hidden = true;
   const userNode = appendMessage("user", text);
-  const pending = appendMessage("assistant", "正在回复");
+  const pending = appendMessage("assistant", "正在思考");
   pending.classList.add("is-pending");
   const body = pending.querySelector(".msg-text");
   setStreaming(true);
   abortController = new AbortController();
+  const reveal = createAnswerReveal(body, () => scrollDown());
+  activeReveal = reveal;
   let started = false;
-  let accumulated = "";
   scrollDown();
   try {
     const response = await fetch("/api/chat", {
@@ -557,6 +581,10 @@ async function sendMessage(textOverride, options) {
     }
     started = true;
     await readStream(response, {
+      onStatus(text) {
+        if (!pending.classList.contains("is-pending") || !text) return;
+        body.textContent = text;
+      },
       onMeta(conversation) {
         if (activeProjectId !== projectAtSend) return;
         if (conversation.project_id && conversation.project_id !== projectAtSend) return;
@@ -569,28 +597,41 @@ async function sendMessage(textOverride, options) {
       onDelta(piece) {
         pending.classList.remove("is-pending");
         pending.classList.add("is-streaming");
-        accumulated += piece;
-        body.textContent = accumulated;
-        scrollDown();
+        reveal.push(piece);
       },
       onError(message) {
-        pending.classList.remove("is-pending", "is-streaming");
-        pending.classList.add("is-error");
-        body.textContent = accumulated ? accumulated + "\n\n" + message : message;
+        reveal.fail(message);
       },
       onDone(event) {
-        pending.classList.remove("is-pending", "is-streaming");
-        if (accumulated) body.innerHTML = renderMarkdown(accumulated);
-        else body.textContent = "模型没有返回文字。";
         if (event && event.refresh_layout && activeProjectId === projectAtSend) showTab("layout");
         else if (event && event.refresh_files && activeProjectId === projectAtSend) renderResult();
-        if (event && event.confirm_sap && activeProjectId === projectAtSend) showSapDialog();
-        bannerEl.hidden = true;
-        statusDot.classList.add("is-ready");
-        statusText.textContent = "DeepSeek 已连接";
+        reveal.complete(event);
       },
     });
+    reveal.complete();
+    const outcome = await reveal.finished;
+    if (activeReveal !== reveal) return;
+    pending.classList.remove("is-pending", "is-streaming");
+    if (outcome.status === "error") {
+      pending.classList.add("is-error");
+      paintAnswer(body, outcome.shown, true);
+      const note = document.createElement("p");
+      note.textContent = outcome.message || "没有收到模型回复。";
+      body.append(note);
+    } else if (outcome.status === "cancelled") {
+      if (!outcome.shown) pending.remove();
+      else paintAnswer(body, outcome.shown, true);
+    } else if (outcome.shown) {
+      paintAnswer(body, outcome.shown, true);
+      if (outcome.event && outcome.event.confirm_sap && activeProjectId === projectAtSend) showSapDialog();
+      bannerEl.hidden = true;
+      statusDot.classList.add("is-ready");
+      statusText.textContent = "DeepSeek 已连接";
+    } else {
+      body.textContent = "模型没有返回文字。";
+    }
   } catch (error) {
+    reveal.cancel();
     if (error.name === "AbortError" && !started) {
       userNode.remove();
       pending.remove();
@@ -599,8 +640,8 @@ async function sendMessage(textOverride, options) {
       showWelcome();
     } else if (error.name === "AbortError") {
       pending.classList.remove("is-pending", "is-streaming");
-      if (!accumulated) pending.remove();
-      else body.textContent = accumulated;
+      if (!reveal.shown()) pending.remove();
+      else paintAnswer(body, reveal.shown(), true);
     } else if (!started) {
       userNode.remove();
       pending.remove();
@@ -611,14 +652,105 @@ async function sendMessage(textOverride, options) {
     } else {
       pending.classList.remove("is-pending", "is-streaming");
       pending.classList.add("is-error");
-      body.textContent = accumulated || "回复中断了。";
+      body.textContent = reveal.shown() || "回复中断了。";
     }
   } finally {
+    if (activeReveal === reveal) activeReveal = null;
     setStreaming(false);
     abortController = null;
     scrollDown();
     inputEl.focus();
   }
+}
+
+function createAnswerReveal(body, onPaint) {
+  let incoming = "";
+  let shown = "";
+  let timer = 0;
+  let status = "open";
+  let doneEvent = null;
+  let errorMessage = "";
+  let resolveFinished = () => {};
+  const finished = new Promise((resolve) => {
+    resolveFinished = resolve;
+  });
+
+  function kick() {
+    if (!timer) timer = window.setInterval(tick, 40);
+  }
+
+  function stopTimer() {
+    if (!timer) return;
+    window.clearInterval(timer);
+    timer = 0;
+  }
+
+  function tick() {
+    if (status === "cancelled") {
+      stopTimer();
+      return;
+    }
+    if (incoming) {
+      const count = Math.min(16, Math.max(2, Math.ceil(incoming.length / 110)));
+      shown += incoming.slice(0, count);
+      incoming = incoming.slice(count);
+      paintAnswer(body, shown, false);
+      onPaint();
+      return;
+    }
+    if (status === "open") return;
+    stopTimer();
+    resolveFinished({ status, shown, event: doneEvent, message: errorMessage });
+  }
+
+  return {
+    push(text) {
+      if (status !== "open" || !text) return;
+      incoming += text;
+      kick();
+    },
+    complete(event) {
+      if (status !== "open") return;
+      doneEvent = event || null;
+      status = "done";
+      kick();
+      tick();
+    },
+    fail(message) {
+      if (status !== "open") return;
+      errorMessage = message || "";
+      status = "error";
+      kick();
+      tick();
+    },
+    cancel() {
+      if (status === "cancelled") return;
+      status = "cancelled";
+      incoming = "";
+      stopTimer();
+      resolveFinished({ status, shown, event: null, message: "" });
+    },
+    shown() {
+      return shown;
+    },
+    finished,
+  };
+}
+
+function paintAnswer(body, text, finalPaint) {
+  if (finalPaint || text.endsWith("\n")) {
+    body.innerHTML = renderMarkdown(text);
+    return;
+  }
+  const split = text.lastIndexOf("\n");
+  if (split < 0) {
+    body.textContent = text;
+    return;
+  }
+  body.innerHTML = renderMarkdown(text.slice(0, split + 1));
+  const tail = document.createElement("p");
+  tail.textContent = text.slice(split + 1);
+  body.append(tail);
 }
 
 async function readStream(response, handlers) {
@@ -636,6 +768,7 @@ async function readStream(response, handlers) {
       if (!line) continue;
       const data = JSON.parse(line.slice(5).trim());
       if (data.type === "meta" && data.conversation) handlers.onMeta(data.conversation);
+      else if (data.type === "status" && handlers.onStatus) handlers.onStatus(data.text || "");
       else if (data.type === "delta") handlers.onDelta(data.text || "");
       else if (data.type === "error") handlers.onError(data.message || "没有收到模型回复。");
       else if (data.type === "done") handlers.onDone(data);
@@ -645,6 +778,7 @@ async function readStream(response, handlers) {
 
 function stop() {
   if (abortController) abortController.abort();
+  if (activeReveal) activeReveal.cancel();
 }
 
 function appendMessage(role, text, { markdown = false } = {}) {
@@ -950,6 +1084,7 @@ function renderResult() {
 
 let fileMenu = null;
 let fileMenuTarget = null;
+let textMenu = null;
 
 function paintFiles(projectId, data) {
   closeFileMenu();
@@ -991,36 +1126,67 @@ function paintFiles(projectId, data) {
       empty.textContent = "还没有文件";
       section.append(empty);
     } else {
-      section.append(fileList(projectId, folder.files, picker));
+      section.append(fileTree(projectId, folder.files, picker));
     }
     resultBody.append(section);
   }
 }
 
-function fileList(projectId, files, picker) {
+function fileTree(projectId, nodes, picker) {
   const list = document.createElement("ul");
-  list.className = "file-list";
-  for (const file of files) {
-    const item = document.createElement("li");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "file-link";
-    button.textContent = file.directory ? file.name + "/" : file.name;
-    button.addEventListener("click", () => openWorkspaceFile(projectId, file.path));
-    button.addEventListener("contextmenu", (event) => {
+  list.className = "file-tree";
+  for (const node of nodes) list.append(fileNode(projectId, node, picker));
+  return list;
+}
+
+function fileNode(projectId, node, picker) {
+  const item = document.createElement("li");
+  if (node.directory) {
+    const children = Array.isArray(node.children) ? node.children : [];
+    const folder = document.createElement("button");
+    folder.type = "button";
+    folder.className = "file-folder";
+    folder.append(fileCaret(children.length > 0));
+    const label = document.createElement("span");
+    label.textContent = node.name;
+    folder.append(label);
+    const branch = children.length ? fileTree(projectId, children, picker) : null;
+    if (branch) {
+      folder.setAttribute("aria-expanded", "true");
+      folder.addEventListener("click", () => {
+        const open = folder.getAttribute("aria-expanded") !== "true";
+        folder.setAttribute("aria-expanded", open ? "true" : "false");
+        branch.hidden = !open;
+      });
+    }
+    folder.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      openFileMenu(event, {
-        projectId,
-        path: file.directory ? "" : file.path,
-        name: file.name,
-        picker,
-      });
+      openFileMenu(event, { projectId, path: "", name: node.name, picker });
     });
-    item.append(button);
-    list.append(item);
+    item.append(folder);
+    if (branch) item.append(branch);
+    return item;
   }
-  return list;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "file-link";
+  button.textContent = node.name;
+  button.addEventListener("click", () => openWorkspaceFile(projectId, node.path));
+  button.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openFileMenu(event, { projectId, path: node.path, name: node.name, picker });
+  });
+  item.append(button);
+  return item;
+}
+
+function fileCaret(visible) {
+  const caret = document.createElement("span");
+  caret.className = visible ? "file-caret" : "file-caret is-empty";
+  caret.setAttribute("aria-hidden", "true");
+  return caret;
 }
 
 function ensureFileMenu() {
@@ -1049,6 +1215,7 @@ function ensureFileMenu() {
 }
 
 function openFileMenu(event, target) {
+  closeTextMenu();
   const menu = ensureFileMenu();
   fileMenuTarget = target;
   menu.querySelector("[data-action=delete]").disabled = !target.path;
@@ -1068,6 +1235,73 @@ function closeFileMenu() {
   if (!fileMenu) return;
   fileMenu.hidden = true;
   fileMenuTarget = null;
+}
+
+function openTextMenu(x, y, items) {
+  closeFileMenu();
+  closeTextMenu();
+  const menu = document.createElement("div");
+  menu.className = "file-menu";
+  menu.setAttribute("role", "menu");
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    button.textContent = item.label;
+    button.disabled = Boolean(item.disabled);
+    button.addEventListener("click", () => {
+      closeTextMenu();
+      item.run();
+    });
+    menu.append(button);
+  }
+  document.body.append(menu);
+  textMenu = menu;
+  const margin = 8;
+  let left = x;
+  let top = y;
+  if (left + menu.offsetWidth > window.innerWidth - margin) left = window.innerWidth - menu.offsetWidth - margin;
+  if (top + menu.offsetHeight > window.innerHeight - margin) top = window.innerHeight - menu.offsetHeight - margin;
+  menu.style.left = Math.max(margin, left) + "px";
+  menu.style.top = Math.max(margin, top) + "px";
+}
+
+function closeTextMenu() {
+  if (!textMenu) return;
+  textMenu.remove();
+  textMenu = null;
+}
+
+function assistantSelection(message) {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return "";
+  const range = selection.getRangeAt(0);
+  if (!message.contains(range.startContainer) || !message.contains(range.endContainer)) return "";
+  return range.toString();
+}
+
+function copyPlainText(text) {
+  if (!text) return;
+  const done = navigator.clipboard && navigator.clipboard.writeText
+    ? navigator.clipboard.writeText(text)
+    : Promise.reject(new Error("clipboard"));
+  done.catch(() => showToast("没有复制成功。"));
+}
+
+async function pasteIntoInput() {
+  let text = "";
+  try {
+    text = await navigator.clipboard.readText();
+  } catch (error) {
+    showToast("没有读到剪贴板。可以按 Ctrl+V 粘贴。");
+    return;
+  }
+  if (!text || inputEl.disabled) return;
+  const start = inputEl.selectionStart ?? inputEl.value.length;
+  const end = inputEl.selectionEnd ?? start;
+  inputEl.focus();
+  inputEl.setRangeText(text, start, end, "end");
+  inputEl.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function deleteWorkspaceFile(projectId, path, name) {
@@ -1235,25 +1469,84 @@ function renderBlocks(source) {
   const lines = source.split("\n");
   let html = "";
   let list = [];
+  let index = 0;
   const flush = () => {
     if (!list.length) return;
     html += "<ul>" + list.map((item) => "<li>" + inline(item) + "</li>").join("") + "</ul>";
     list = [];
   };
-  for (const line of lines) {
+  while (index < lines.length) {
+    const line = lines[index];
     const item = /^[-*]\s+(.*)$/.exec(line);
     if (item) {
       list.push(item[1]);
+      index += 1;
       continue;
     }
     flush();
-    if (!line.trim()) continue;
+    if (isTableRow(line) && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+      const headers = splitTableRow(line);
+      const align = splitTableRow(lines[index + 1]).map(tableAlign);
+      index += 2;
+      const rows = [];
+      while (index < lines.length && isTableRow(lines[index]) && !isTableSeparator(lines[index])) {
+        rows.push(splitTableRow(lines[index]));
+        index += 1;
+      }
+      html += renderTable(headers, align, rows);
+      continue;
+    }
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
     const heading = /^(#{1,3})\s+(.*)$/.exec(line);
     if (heading) html += '<p class="md-h">' + inline(heading[2]) + "</p>";
     else html += "<p>" + inline(line) + "</p>";
+    index += 1;
   }
   flush();
   return html;
+}
+
+function isTableRow(line) {
+  const trimmed = line.trim();
+  return trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.length > 2;
+}
+
+function isTableSeparator(line) {
+  if (!isTableRow(line)) return false;
+  return splitTableRow(line).every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function splitTableRow(line) {
+  let text = line.trim();
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|")) text = text.slice(0, -1);
+  return text.split("|").map((cell) => cell.trim());
+}
+
+function tableAlign(cell) {
+  if (cell.startsWith(":") && cell.endsWith(":")) return "center";
+  if (cell.endsWith(":")) return "right";
+  return "left";
+}
+
+function renderTable(headers, align, rows) {
+  const head = "<tr>" + headers.map((cell, column) => (
+    "<th" + alignAttr(align[column]) + ">" + inline(cell) + "</th>"
+  )).join("") + "</tr>";
+  const body = rows.map((row) => (
+    "<tr>" + headers.map((_, column) => (
+      "<td" + alignAttr(align[column]) + ">" + inline(row[column] || "") + "</td>"
+    )).join("") + "</tr>"
+  )).join("");
+  return '<div class="md-table-wrap"><table><thead>' + head + "</thead><tbody>" + body + "</tbody></table></div>";
+}
+
+function alignAttr(value) {
+  if (value === "right" || value === "center") return ' class="' + value + '"';
+  return "";
 }
 
 function inline(text) {

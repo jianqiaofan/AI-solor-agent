@@ -158,22 +158,93 @@ def report(result: dict[str, Any], program: str, design: dict[str, Any]) -> str:
         lines.append(design["message"])
     lines.append(f"钢构件总重 {design['total_mass_kg']:.1f} kg（不含连接件）。")
     lines.append(f"模型文件：{result['model_file']}。")
-    by_id = {item["id"]: item for item in design["members"]}
-    for member in result["members"]:
-        force = member["forces"]
-        detail = by_id[member["id"]]
-        lines.append(
-            f"{member['id']}  L={member['length']} m  {member['section']}  "
-            f"应力比 {member['ratio']:.3f}（{detail['governing']}）  "
-            f"N={force['N']} kN  Vy={force['Vy']} kN  Vz={force['Vz']} kN  "
-            f"My={force['My']} kN·m  Mz={force['Mz']} kN·m"
-        )
+    lines.extend(_member_tables(result, design))
     lines.append(
         "内力取全部工况和组合里绝对值最大的值，保留正负号，正值指向下方。"
         "应力比按截面强度：√(σ² + 3τ²) / (0.9 fy)，σ 用角轴弹性截面模量。"
         "立柱整体稳定和板件局部屈曲没有验算。"
     )
     return "\n".join(lines)
+
+
+_TABLE_HEADERS = (
+    "编号",
+    "L (m)",
+    "截面",
+    "应力比",
+    "控制工况",
+    "N (kN)",
+    "Vy (kN)",
+    "Vz (kN)",
+    "My (kN·m)",
+    "Mz (kN·m)",
+)
+_TABLE_ALIGN = ("---", "---:", "---", "---:", "---", "---:", "---:", "---:", "---:", "---:")
+_ROLE_TITLES = {"beam": "主梁", "column": "立柱"}
+
+
+def _member_tables(result: dict[str, Any], design: dict[str, Any]) -> list[str]:
+    by_id = {item["id"]: item for item in design["members"]}
+    groups: list[tuple[str, list[list[str]]]] = []
+    for member in result["members"]:
+        detail = by_id.get(member["id"]) or {}
+        title = _group_title(str(member["id"]), detail)
+        row = _member_row(member, detail)
+        if groups and groups[-1][0] == title:
+            groups[-1][1].append(row)
+        else:
+            groups.append((title, [row]))
+    lines: list[str] = []
+    for title, rows in groups:
+        lines.extend(["", f"### {title}", "", *_markdown_table(rows)])
+    if lines:
+        lines.append("")
+    return lines
+
+
+def _group_title(member_id: str, detail: dict[str, Any]) -> str:
+    role = str(detail.get("role") or "")
+    if role in _ROLE_TITLES:
+        return _ROLE_TITLES[role]
+    if member_id.startswith("B"):
+        return "主梁"
+    if member_id.startswith("C"):
+        return "立柱"
+    return "杆件"
+
+
+def _member_row(member: dict[str, Any], detail: dict[str, Any]) -> list[str]:
+    force = member["forces"]
+    return [
+        _cell(member["id"]),
+        _plain_number(member["length"]),
+        _cell(member["section"]),
+        f"{float(member['ratio']):.3f}",
+        _cell(detail.get("governing") or ""),
+        _plain_number(force["N"]),
+        _plain_number(force["Vy"]),
+        _plain_number(force["Vz"]),
+        _plain_number(force["My"]),
+        _plain_number(force["Mz"]),
+    ]
+
+
+def _markdown_table(rows: list[list[str]]) -> list[str]:
+    def line(cells: tuple[str, ...] | list[str]) -> str:
+        return "| " + " | ".join(cells) + " |"
+
+    return [line(_TABLE_HEADERS), line(_TABLE_ALIGN), *(line(row) for row in rows)]
+
+
+def _plain_number(value: Any) -> str:
+    number = float(value)
+    if number == 0:
+        return "0"
+    return f"{number:.4f}".rstrip("0").rstrip(".")
+
+
+def _cell(value: Any) -> str:
+    return str(value).replace("|", "/").replace("\n", " ").strip()
 
 
 def _member(
