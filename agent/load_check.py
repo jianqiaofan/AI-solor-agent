@@ -9,7 +9,7 @@ from typing import Any
 from pathlib import Path
 
 from agent.case_edit import persist_updates
-from agent.intent import CHAT, EXTRACT, LOADS, SNOW, UPDATE, WIND
+from agent.intent import CHAT, DESIGN, EXTRACT, LOADS, SAP, SNOW, UPDATE, WIND
 from agent.load_tools import run_load_tool
 
 _ASCE = "USA(ASCE7-16)"
@@ -24,9 +24,10 @@ _AVERAGING = (
     ("1 h mean", ("1 h mean", "1h mean", "1小时", "1 小时")),
     ("fastest-mile", ("fastest-mile", "fastest mile")),
 )
+_LEAD = r"(?:改成|改为|调成|调为|设为|是|为)"
+_VALUE_INTRO = rf"\s*(?:{_LEAD}\s*)?[:：]?\s*"
 _TERRAIN = re.compile(
-    r"(?:地形类别|地形|terrain(?:\s*category)?)"
-    r"\s*(?:改成|改为|调成|调为|设为|是|为|[:：])?\s*(0|IV|III|II|I)(?![A-Za-z0-9])",
+    rf"(?:地形类别|地形|terrain(?:\s*category)?){_VALUE_INTRO}(0|IV|III|II|I)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _EXPOSURE = (
@@ -35,11 +36,10 @@ _EXPOSURE = (
     ("normal", ("normal", "正常暴露", "暴露正常", "暴露条件正常")),
 )
 _EXPOSURE_LABELED = re.compile(
-    r"(?:雪荷载暴露条件|暴露条件|雪荷载暴露)"
-    r"\s*(?:改成|改为|调成|调为|设为|是|为|[:：])?\s*(windswept|sheltered|normal|全暴露|遮蔽|正常)",
+    rf"(?:雪荷载暴露条件|暴露条件|雪荷载暴露){_VALUE_INTRO}"
+    r"(windswept|sheltered|normal|全暴露|遮蔽|正常)",
     re.IGNORECASE,
 )
-_VALUE_INTRO = r"\s*(?:改成|改为|调成|调为|设为|是|为|[:：])?\s*"
 _SPEED = re.compile(rf"风速(?!时距){_VALUE_INTRO}([0-9]+(?:\.[0-9]+)?)\s*(m/s|km/h|mph)?", re.IGNORECASE)
 _SPEED_UNIT = re.compile(rf"风速单位{_VALUE_INTRO}(m/s|km/h|mph)", re.IGNORECASE)
 _SNOW_LOAD = re.compile(
@@ -52,6 +52,11 @@ _LENGTH = re.compile(rf"组件长度{_VALUE_INTRO}([0-9]+(?:\.[0-9]+)?)")
 _WIDTH = re.compile(rf"组件宽度{_VALUE_INTRO}([0-9]+(?:\.[0-9]+)?)")
 _CLEARANCE = re.compile(rf"(?:组件下沿离地高度|离地高度){_VALUE_INTRO}([0-9]+(?:\.[0-9]+)?)")
 _ROWS = re.compile(rf"(?:组件排数|排数){_VALUE_INTRO}([0-9]+(?:\.[0-9]+)?)")
+_ARRANGEMENT_TOKEN = r"[1-9]\d*(?:\s*/\s*[1-9]\d*)+"
+_ARRANGEMENT_LABELED = re.compile(
+    rf"(?:布置列数|每排(?:的)?排布|每排){_VALUE_INTRO}({_ARRANGEMENT_TOKEN})"
+)
+_ARRANGEMENT_CHANGED = re.compile(rf"(?:改为|改成|调成|调为|设为|换成|变成)\s*({_ARRANGEMENT_TOKEN})")
 _PILE = re.compile(rf"桩入土深度{_VALUE_INTRO}([0-9]+(?:\.[0-9]+)?)")
 _TEMP_HIGH = re.compile(rf"(?:极端)?最高温度{_VALUE_INTRO}(-?[0-9]+(?:\.[0-9]+)?)")
 _TEMP_LOW = re.compile(rf"(?:极端)?最低温度{_VALUE_INTRO}(-?[0-9]+(?:\.[0-9]+)?)")
@@ -79,7 +84,7 @@ _LABELED_EXPOSURE = {
 
 def resolve_load_follow_up(intent: str, messages: list[dict]) -> str:
     """上一句在问缺的参数，而这句正在补，就继续算，不要掉回普通对话。"""
-    if intent in (WIND, SNOW, LOADS):
+    if intent in (WIND, SNOW, LOADS, SAP):
         return intent
     previous = _previous_assistant(messages)
     first = previous.splitlines()[0] if previous else ""
@@ -94,13 +99,21 @@ def resolve_load_follow_up(intent: str, messages: list[dict]) -> str:
     return intent
 
 
+def arrangement_columns_update(text: str) -> str | None:
+    """从「每排改为 22/22」「由 11/22 改为 22/22」里取出新的布置列数。"""
+    found = _ARRANGEMENT_LABELED.search(text) or _ARRANGEMENT_CHANGED.search(text)
+    if not found:
+        return None
+    return re.sub(r"\s+", "", found.group(1))
+
+
 def supplies_load_parameter(text: str) -> bool:
     return bool(collect_updates(text))
 
 
 def resolve_parameter_edit(intent: str, text: str) -> str:
     """没在算荷载，但这句话是在改计算参数，就去写 design_case.json。"""
-    if intent in (WIND, SNOW, LOADS, EXTRACT):
+    if intent in (WIND, SNOW, LOADS, EXTRACT, DESIGN, SAP):
         return intent
     if not collect_updates(text):
         # 分类器当成改参数，但这句话对不上已有字段时，交回带历史的对话。
@@ -179,10 +192,10 @@ def answer_load_request(
     blocks: list[str] = []
     if gaps:
         names = "和".join(
-            _action_name(item) for item in ("wind", "snow") if item in actions and item in gaps
+            _action_name(item) for item in _ACTION_ORDER if item in actions and item in gaps
         )
         lines = [f"还不能计算{names}。已查看 {relative}，下面这些计算参数还没有："]
-        for action in ("wind", "snow"):
+        for action in _ACTION_ORDER:
             for item in gaps.get(action, []):
                 lines.append(f"- {item}")
         lines.append("请补充这些参数。补全之前不会调用对应的荷载工具。")
@@ -194,8 +207,13 @@ def answer_load_request(
             blocks.append(f"{name} 没有算成：{payload['error']}")
             continue
         results.append(payload)
+    if not gaps and {"wind", "snow", "dead"} <= {item.get("action") for item in results}:
+        _save_loads(case, results, path)
     if results:
         result_lines = [_format_results(results)]
+        line_text = _line_load_text(case, results)
+        if line_text:
+            result_lines.append(line_text)
         status = case.get("status")
         if status and status != "confirmed":
             result_lines.append(f"案例状态还是 {status}。")
@@ -203,6 +221,130 @@ def answer_load_request(
     if saved:
         blocks.append(saved)
     return "\n\n".join(blocks).strip(), wrote
+
+
+def _save_loads(
+    case: dict[str, Any],
+    results: list[dict[str, Any]],
+    path: Path | None,
+) -> bool:
+    """风、雪和组件自重都算出时，写成 loads.json。缺修订号就不写。"""
+    if path is None:
+        return False
+    revision = case.get("revision")
+    if not isinstance(revision, str) or not revision.strip():
+        return False
+    cases: list[dict[str, Any]] = []
+    trace: list[dict[str, Any]] = []
+    for result in results:
+        for item in result.get("cases") or []:
+            if not isinstance(item, dict) or not item.get("id") or not item.get("name"):
+                continue
+            case_row = {
+                "id": str(item["id"]),
+                "name": str(item["name"]),
+                "value": item.get("value"),
+                "unit": item.get("unit"),
+            }
+            if item.get("target"):
+                case_row["target"] = item["target"]
+            if item.get("formula_id"):
+                case_row["formula_id"] = item["formula_id"]
+            cases.append(case_row)
+        for step in result.get("trace") or []:
+            if not isinstance(step, dict):
+                continue
+            kept = {
+                key: step[key]
+                for key in ("formula_id", "clause", "expression", "substitution", "result", "unit")
+                if key in step
+            }
+            if {"formula_id", "expression", "result", "unit"} <= set(kept):
+                trace.append(kept)
+    length_mm = _module_length_mm(case)
+    if length_mm is not None:
+        line_cases, line_trace = _beam_line_loads(cases, length_mm)
+        cases.extend(line_cases)
+        trace.extend(line_trace)
+    document = {
+        "schema_version": "1.0.0",
+        "design_case_revision": revision.strip(),
+        "cases": cases,
+        "combinations": [],
+        "trace": trace,
+    }
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import ValidationError
+
+    from agent.settings import ROOT
+
+    schema = json.loads((ROOT / "contracts" / "schemas" / "loads.schema.json").read_text(encoding="utf-8"))
+    try:
+        Draft202012Validator(schema).validate(document)
+    except ValidationError:
+        return False
+    target = path.parent / "loads.json"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _line_load_text(case: dict[str, Any], results: list[dict[str, Any]]) -> str:
+    flat = [item for result in results for item in (result.get("cases") or [])]
+    length_mm = _module_length_mm(case)
+    if length_mm is None:
+        if any(_is_module_area_load(item) for item in flat):
+            return "组件长度是空的，没有把面荷载转成线荷载。"
+        return ""
+    return "\n".join(_summary_lines(flat, length_mm))
+
+
+def _module_length_mm(case: dict[str, Any]) -> float | None:
+    geometry = case.get("geometry") if isinstance(case.get("geometry"), dict) else {}
+    value = geometry.get("module_length_mm")
+    try:
+        length = float(value)
+    except (TypeError, ValueError):
+        return None
+    if length <= 0:
+        return None
+    return length
+
+
+def _beam_line_loads(
+    area_cases: list[dict[str, Any]],
+    length_mm: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    _ensure_line_load()
+    from loads.tools.line_load import beam_line_cases
+
+    return beam_line_cases(area_cases, length_mm)
+
+
+def _summary_lines(area_cases: list[dict[str, Any]], length_mm: float) -> list[str]:
+    _ensure_line_load()
+    from loads.tools.line_load import summary_lines
+
+    return summary_lines(area_cases, length_mm)
+
+
+def _is_module_area_load(item: dict[str, Any]) -> bool:
+    _ensure_line_load()
+    from loads.tools.line_load import is_module_area_load
+
+    return is_module_area_load(item)
+
+
+def _ensure_line_load() -> None:
+    from agent.load_tools import _ensure_loads_path
+
+    _ensure_loads_path()
+
+
+_ACTION_ORDER = ("wind", "snow", "dead")
 
 
 def _plan(
@@ -225,6 +367,12 @@ def _plan(
             gaps["snow"] = missing
         else:
             calls.append((_snow_tool(code), kwargs))
+    if "dead" in actions:
+        missing, kwargs = _dead(case)
+        if missing:
+            gaps["dead"] = missing
+        else:
+            calls.append(("moduleDead", kwargs))
     return gaps, calls
 
 
@@ -298,6 +446,21 @@ def _snow(
     return [], kwargs
 
 
+def _dead(case: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    geometry = case.get("geometry") if isinstance(case.get("geometry"), dict) else {}
+    missing: list[str] = []
+    weight = _number(geometry, "module_weight_kg", "组件重量", missing)
+    length = _number(geometry, "module_length_mm", "组件长度", missing)
+    width = _number(geometry, "module_width_mm", "组件宽度", missing)
+    if missing:
+        return missing, {}
+    return [], {
+        "module_weight_kg": weight,
+        "module_length_mm": length,
+        "module_width_mm": width,
+    }
+
+
 def _averaging(value: Any, supplement: str, code: str, missing: list[str]) -> str | None:
     required = _ASCE_AVERAGING if code == _ASCE else _EN_AVERAGING
     code_name = "ASCE 7-16" if code == _ASCE else "EN 1991-1-4"
@@ -346,11 +509,11 @@ def _actions(intent: str) -> set[str]:
         return {"wind"}
     if intent == SNOW:
         return {"snow"}
-    return {"wind", "snow"}
+    return {"wind", "snow", "dead"}
 
 
 def _action_name(action: str) -> str:
-    return "风荷载" if action == "wind" else "雪荷载"
+    return {"wind": "风荷载", "snow": "雪荷载", "dead": "组件自重"}[action]
 
 
 def _wind_tool(code: str) -> str:
@@ -364,8 +527,12 @@ def _snow_tool(code: str) -> str:
 def _format_results(results: list[dict[str, Any]]) -> str:
     blocks: list[str] = []
     for result in results:
-        title = "风荷载" if result.get("action") == "wind" else "雪荷载"
-        lines = [f"{result.get('code')} {title}："]
+        action = result.get("action")
+        if action == "dead":
+            lines = ["组件自重："]
+        else:
+            title = "风荷载" if action == "wind" else "雪荷载"
+            lines = [f"{result.get('code')} {title}："]
         cases = result.get("cases") or []
         if result.get("action") == "wind":
             lines.extend(_wind_reply_lines(cases))
@@ -519,6 +686,9 @@ def collect_updates(text: str) -> dict[str, Any]:
     rows = _ROWS.search(text)
     if rows:
         updates["geometry.arrangement_rows"] = _number_token(rows.group(1))
+    arrangement = arrangement_columns_update(text)
+    if arrangement:
+        updates["geometry.arrangement_columns"] = arrangement
     pile = _PILE.search(text)
     if pile:
         updates["geometry.pile_embedment_depth_mm"] = _number_token(pile.group(1))

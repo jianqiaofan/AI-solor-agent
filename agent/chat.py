@@ -19,6 +19,9 @@ _LOAD_GUIDE = (
     "计算风荷载或雪荷载时必须调用工具，不要心算。"
     "USA(ASCE7-16) 用 windASCE16 和 snowASCE16。"
     "Europe(Eurocode 1991-4) 用 windEN1991 和 snowEN1991。"
+    "计算荷载时还要调用 moduleDead。"
+    "它用组件重量、长度和宽度，把单块组件自重除以组件面积，得到 kN/m² 的面荷载。"
+    "两本规范都用这一个工具。"
     "参数只用设计案例里已经写出的数值，或用户在当前这句话里明确给出的数值。"
     "案例里是 null、用户也没有给出的项，不要猜测。"
     "欧标风的地形类别，以及欧标雪的暴露条件 windswept、normal、sheltered，都不在资料表里。"
@@ -47,6 +50,7 @@ def to_messages(
     *,
     design_case: str | None = None,
     load_tools: bool = False,
+    project_facts: bool = False,
 ) -> list:
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -69,6 +73,19 @@ def to_messages(
             content += "当前项目还没有 design_case.json。没有案例、用户也没有给出数值时，不要调用荷载工具。"
         if design_case:
             content += "当前项目的 design_case.json 如下：\n" + design_case
+    elif project_facts:
+        content += (
+            "用户在了解这个项目已经记下的情况。"
+            "只使用设计案例里写出的值，不要编造。"
+            "值是 null 或空字符串时，说这项还没有。"
+            "这个回答不会修改 design_case.json。不要说已经改过或写入了文件。"
+            "不要把这次回答说成已经提取、已经改过参数、已经算过荷载或已经出过计算书。"
+        )
+        relative = f"projects/{project_name}/成果/design_case.json" if project_name else "design_case.json"
+        if design_case:
+            content += f"当前项目的 {relative} 如下：\n" + design_case
+        else:
+            content += f"还没有 {relative}。不要编造组件排布、桩埋深或其他设计参数。"
     messages: list = [SystemMessage(content=content)]
     for item in history[-MAX_HISTORY:]:
         content = str(item.get("content") or "").strip()

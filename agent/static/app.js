@@ -11,6 +11,7 @@ const searchEl = document.getElementById("search");
 const welcomeTitle = document.querySelector("#welcome h2");
 const welcomeText = document.querySelector("#welcome p");
 const projectDialog = document.getElementById("project-dialog");
+const sapDialog = document.getElementById("sap-dialog");
 const projectForm = document.getElementById("project-form");
 const projectNameEl = document.getElementById("project-name");
 const projectError = document.getElementById("project-error");
@@ -42,10 +43,16 @@ projectDialog.addEventListener("click", (event) => {
   if (event.target === projectDialog) closeProjectDialog();
 });
 projectForm.addEventListener("submit", createProject);
+document.getElementById("sap-cancel").addEventListener("click", closeSapDialog);
+sapDialog.addEventListener("click", (event) => {
+  if (event.target === sapDialog) closeSapDialog();
+});
+document.getElementById("sap-form").addEventListener("submit", confirmSap);
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   closeFileMenu();
   if (!projectDialog.hidden) closeProjectDialog();
+  if (!sapDialog.hidden) closeSapDialog();
 });
 document.addEventListener("click", (event) => {
   if (fileMenu && !fileMenu.hidden && !fileMenu.contains(event.target)) closeFileMenu();
@@ -72,6 +79,8 @@ let booting = false;
 let projectsLoaded = false;
 let currentTab = "files";
 let filesRequest = 0;
+let preferredLeft = 0;
+let preferredRight = 0;
 
 init();
 document.addEventListener("visibilitychange", () => {
@@ -266,6 +275,20 @@ function closeProjectDialog() {
   projectDialog.hidden = true;
 }
 
+function showSapDialog() {
+  sapDialog.hidden = false;
+}
+
+function closeSapDialog() {
+  sapDialog.hidden = true;
+}
+
+function confirmSap(event) {
+  event.preventDefault();
+  closeSapDialog();
+  sendMessage("确认调用 SAP2000", { confirmSap: true });
+}
+
 async function createProject(event) {
   event.preventDefault();
   projectError.hidden = true;
@@ -349,7 +372,7 @@ function showWelcome() {
     return;
   }
   welcomeTitle.textContent = "需要我做什么？";
-  welcomeText.textContent = "只讨论「" + project.name + "」。可以说「从资料提取设计参数」。荷载和计算书后面再接。";
+  welcomeText.textContent = "只讨论「" + project.name + "」。可以说「从资料提取设计参数」，或「设计支架」先布置线模。";
   welcomeEl.hidden = false;
 }
 
@@ -485,8 +508,8 @@ function onSubmit(event) {
   sendMessage();
 }
 
-async function sendMessage() {
-  const text = inputEl.value.trim();
+async function sendMessage(textOverride, options) {
+  const text = String(textOverride || inputEl.value).trim();
   if (!activeProjectId) {
     showToast("请先新建并选中一个项目。");
     return;
@@ -494,7 +517,7 @@ async function sendMessage() {
   if (!text || streaming) return;
   const projectAtSend = activeProjectId;
   const previous = inputEl.value;
-  inputEl.value = "";
+  if (!textOverride) inputEl.value = "";
   fitInput();
   syncSend();
   hideToast();
@@ -517,6 +540,7 @@ async function sendMessage() {
         conversation_id: activeId,
         text,
         model: modelEl.value,
+        confirm_sap: Boolean(options && options.confirmSap),
       }),
       signal: abortController.signal,
     });
@@ -558,7 +582,9 @@ async function sendMessage() {
         pending.classList.remove("is-pending", "is-streaming");
         if (accumulated) body.innerHTML = renderMarkdown(accumulated);
         else body.textContent = "模型没有返回文字。";
-        if (event && event.refresh_files && activeProjectId === projectAtSend) renderResult();
+        if (event && event.refresh_layout && activeProjectId === projectAtSend) showTab("layout");
+        else if (event && event.refresh_files && activeProjectId === projectAtSend) renderResult();
+        if (event && event.confirm_sap && activeProjectId === projectAtSend) showSapDialog();
         bannerEl.hidden = true;
         statusDot.classList.add("is-ready");
         statusText.textContent = "DeepSeek 已连接";
@@ -686,7 +712,120 @@ function setPanel(open) {
   toggleBtn.setAttribute("aria-expanded", open ? "true" : "false");
   toggleBtn.textContent = open ? "收起结果" : "结果";
   remember("agent-results-open", open ? "1" : "0");
+  if (open) keepColumnsInView();
 }
+
+const LEFT_MIN = 180;
+const LEFT_MAX = 480;
+const RIGHT_MIN = 280;
+const RIGHT_MAX = 840;
+const CENTER_MIN = 320;
+const SPLITTER_WIDTH = 8;
+
+function initSplitters() {
+  preferredLeft = Number(recall("agent-sidebar-width")) || 0;
+  preferredRight = Number(recall("agent-results-width")) || 0;
+  keepColumnsInView();
+  bindSplitter(document.getElementById("split-left"), "left");
+  bindSplitter(document.getElementById("split-right"), "right");
+  window.addEventListener("resize", () => {
+    if (document.body.classList.contains("is-resizing")) return;
+    keepColumnsInView();
+  });
+}
+
+function bindSplitter(handle, side) {
+  const key = side === "left" ? "agent-sidebar-width" : "agent-results-width";
+  syncSplitterAria(handle, side, side === "left" ? currentLeft() : currentRight());
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || (side === "right" && resultsEl.hidden)) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const start = side === "left" ? currentLeft() : currentRight();
+    handle.classList.add("is-dragging");
+    document.body.classList.add("is-resizing");
+    handle.setPointerCapture(event.pointerId);
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX;
+      const desired = side === "left" ? start + dx : start - dx;
+      syncSplitterAria(handle, side, applyColumn(side, desired));
+    };
+    const onEnd = () => {
+      handle.classList.remove("is-dragging");
+      document.body.classList.remove("is-resizing");
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onEnd);
+      handle.removeEventListener("pointercancel", onEnd);
+      const width = side === "left" ? currentLeft() : currentRight();
+      if (side === "left") preferredLeft = width;
+      else preferredRight = width;
+      remember(key, String(width));
+      syncSplitterAria(handle, side, width);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onEnd);
+    handle.addEventListener("pointercancel", onEnd);
+  });
+  handle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    if (side === "right" && resultsEl.hidden) return;
+    event.preventDefault();
+    const step = event.shiftKey ? 32 : 8;
+    const dir = event.key === "ArrowRight" ? 1 : -1;
+    const current = side === "left" ? currentLeft() : currentRight();
+    const desired = side === "left" ? current + dir * step : current - dir * step;
+    const width = applyColumn(side, desired);
+    if (side === "left") preferredLeft = width;
+    else preferredRight = width;
+    remember(key, String(width));
+    syncSplitterAria(handle, side, width);
+  });
+}
+
+function keepColumnsInView() {
+  if (preferredLeft) applyColumn("left", preferredLeft);
+  if (!resultsEl.hidden && preferredRight) applyColumn("right", preferredRight);
+}
+
+function applyColumn(side, desired) {
+  const width = clampWidth(side, desired);
+  document.querySelector(".app").style.setProperty(side === "left" ? "--col-left" : "--col-right", width + "px");
+  return width;
+}
+
+function clampWidth(side, desired) {
+  const { min, max } = columnLimits(side);
+  return Math.round(Math.min(Math.max(min, max), Math.max(min, desired)));
+}
+
+function columnLimits(side) {
+  const app = document.querySelector(".app");
+  const rightOpen = !resultsEl.hidden;
+  const splitters = rightOpen ? SPLITTER_WIDTH * 2 : SPLITTER_WIDTH;
+  const other = side === "left" ? (rightOpen ? currentRight() : 0) : currentLeft();
+  const min = side === "left" ? LEFT_MIN : RIGHT_MIN;
+  const cap = side === "left" ? LEFT_MAX : RIGHT_MAX;
+  const room = app.clientWidth - splitters - CENTER_MIN - other;
+  return { min, max: Math.min(cap, Math.max(min, room)) };
+}
+
+function currentLeft() {
+  return Math.round(document.querySelector(".sidebar").getBoundingClientRect().width);
+}
+
+function currentRight() {
+  if (resultsEl.hidden) return 0;
+  return Math.round(resultsEl.getBoundingClientRect().width);
+}
+
+function syncSplitterAria(handle, side, width) {
+  const { min, max } = columnLimits(side);
+  handle.setAttribute("aria-valuemin", String(min));
+  handle.setAttribute("aria-valuemax", String(max));
+  handle.setAttribute("aria-valuenow", String(width));
+}
+
+initSplitters();
 
 function showTab(tab) {
   currentTab = tab || "files";
@@ -866,12 +1005,17 @@ function fileList(projectId, files, picker) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "file-link";
-    button.textContent = file.name;
+    button.textContent = file.directory ? file.name + "/" : file.name;
     button.addEventListener("click", () => openWorkspaceFile(projectId, file.path));
     button.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      openFileMenu(event, { projectId, path: file.path, name: file.name, picker });
+      openFileMenu(event, {
+        projectId,
+        path: file.directory ? "" : file.path,
+        name: file.name,
+        picker,
+      });
     });
     item.append(button);
     list.append(item);

@@ -1,4 +1,4 @@
-"""把四本规范里的风、雪工具交给设计助手调用。"""
+"""把规范里的风、雪工具和组件自重工具交给设计助手调用。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ _EXPECTED = {
     "windEN1991": _EN,
     "snowEN1991": _EN,
 }
+_SHARED = frozenset({"moduleDead"})
 _MAX_ROUNDS = 4
 
 
@@ -45,15 +46,17 @@ def calculation_tools() -> list[Any]:
 
 
 def run_load_tool(name: str, args: dict[str, Any], design_code: str | None) -> dict[str, Any]:
-    expected = _EXPECTED.get(name)
-    if expected is None:
+    functions = _functions()
+    function = functions.get(name)
+    if function is None or (name not in _EXPECTED and name not in _SHARED):
         return {"error": f"没有名为 {name} 的荷载工具。"}
-    if design_code and design_code != expected:
+    expected = _EXPECTED.get(name)
+    if expected is not None and design_code and design_code != expected:
         return {
             "error": f"当前项目规范是 {design_code}。这一步只能使用 {expected} 的工具。",
         }
     try:
-        return _functions()[name](**args)
+        return function(**args)
     except (TypeError, ValueError) as exc:
         return {"error": str(exc)}
 
@@ -109,13 +112,14 @@ def _tool_message(call: dict[str, Any], design_code: str | None):
 
 def _functions() -> dict[str, Any]:
     _ensure_loads_path()
-    from loads.tools.code_loads import snowASCE16, snowEN1991, windASCE16, windEN1991
+    from loads.tools.code_loads import moduleDead, snowASCE16, snowEN1991, windASCE16, windEN1991
 
     return {
         "windASCE16": windASCE16,
         "snowASCE16": snowASCE16,
         "windEN1991": windEN1991,
         "snowEN1991": snowEN1991,
+        "moduleDead": moduleDead,
     }
 
 

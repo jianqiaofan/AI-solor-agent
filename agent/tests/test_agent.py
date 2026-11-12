@@ -13,7 +13,20 @@ from unittest import mock
 from agent.chat import chunk_text, explain, resolve_model, rewrite_extraction_reply, to_messages
 from agent.load_tools import run_load_tool, stream_with_load_tools
 from agent.extract import ExtractionError, extract_project_materials
-from agent.intent import CHAT, EXTRACT, LOADS, SNOW, UPDATE, WIND, classify_intent, parse_intent
+from agent.intent import (
+    CHAT,
+    DESIGN,
+    EXTRACT,
+    INQUIRE,
+    LOADS,
+    SAP,
+    SNOW,
+    UPDATE,
+    WIND,
+    classify_intent,
+    parse_intent,
+    resolve_project_inquiry,
+)
 from agent.load_check import (
     answer_load_request,
     answer_parameter_update,
@@ -160,6 +173,14 @@ class StoreTests(unittest.TestCase):
             names = [item["name"] for item in listed["folders"][1]["files"]]
             self.assertEqual(listed["folders"][0]["files"], [])
             self.assertEqual(names, ["子目录/计算书.docx", "说明.pdf"])
+            (results / "SAP2000").mkdir()
+            (results / "SAP2000" / "model.sdb").write_bytes(b"sdb")
+            (results / "SAP2000" / "model.LOG").write_bytes(b"log")
+            names = [item["name"] for item in store.list_workspace(project["id"])["folders"][1]["files"]]
+            self.assertEqual(names, ["SAP2000", "子目录/计算书.docx", "说明.pdf"])
+            sap = next(item for item in store.list_workspace(project["id"])["folders"][1]["files"] if item["name"] == "SAP2000")
+            self.assertTrue(sap["directory"])
+            self.assertTrue(store.resolve_workspace_file(project["id"], sap["path"], allow_directory=True).is_dir())
             target = store.resolve_workspace_file(project["id"], "projects/甲项目/成果/说明.pdf")
             self.assertEqual(target.name, "说明.pdf")
             with self.assertRaises(FileNotFoundError):
@@ -226,6 +247,9 @@ class ExtractionIntentTests(unittest.TestCase):
         self.assertEqual(parse_intent('{"intent":"calculate_snow"}'), SNOW)
         self.assertEqual(parse_intent('{"intent":"calculate_loads"}'), LOADS)
         self.assertEqual(parse_intent('{"intent":"update_parameters"}'), UPDATE)
+        self.assertEqual(parse_intent('{"intent":"design_line_model"}'), DESIGN)
+        self.assertEqual(parse_intent('{"intent":"run_sap2000"}'), SAP)
+        self.assertEqual(parse_intent('{"intent":"inquire_project"}'), INQUIRE)
         self.assertEqual(parse_intent("今天天气怎么样"), CHAT)
         self.assertEqual(parse_intent('{"intent":"other"}'), CHAT)
 
@@ -348,6 +372,32 @@ class ChatTests(unittest.TestCase):
         self.assertIn("1.5", text)
         self.assertIn("甲项目", text)
 
+    def test_project_question_includes_the_design_case(self) -> None:
+        self.assertEqual(resolve_project_inquiry(CHAT, "这个项目的组件排布是怎样的"), INQUIRE)
+        self.assertEqual(resolve_project_inquiry(CHAT, "桩的埋深是多少"), INQUIRE)
+        self.assertEqual(resolve_project_inquiry(CHAT, "今天天气怎么样"), CHAT)
+        self.assertEqual(resolve_project_inquiry(INQUIRE, "计算风荷载"), WIND)
+        self.assertEqual(resolve_project_inquiry(DESIGN, "这个项目的组件排布"), DESIGN)
+        plain = to_messages([{"role": "user", "content": "你好"}], "aaa")
+        self.assertNotIn("arrangement_columns", plain[0].content)
+        messages = to_messages(
+            [{"role": "user", "content": "这个项目的组件排布和桩的埋深"}],
+            "aaa",
+            design_case='{"geometry":{"arrangement_columns":"11/22","pile_embedment_depth_mm":1500}}',
+            project_facts=True,
+        )
+        text = messages[0].content
+        self.assertIn("projects/aaa/成果/design_case.json", text)
+        self.assertIn("11/22", text)
+        self.assertIn("1500", text)
+        self.assertNotIn("windASCE16", text)
+        missing = to_messages(
+            [{"role": "user", "content": "桩的埋深"}],
+            "aaa",
+            project_facts=True,
+        )
+        self.assertIn("还没有 projects/aaa/成果/design_case.json", missing[0].content)
+
     def test_load_tool_stays_on_the_project_code(self) -> None:
         blocked = run_load_tool(
             "windEN1991",
@@ -369,6 +419,12 @@ class ChatTests(unittest.TestCase):
             "USA(ASCE7-16)",
         )
         self.assertEqual(snow["cases"][0]["value"], 0.9072)
+        dead = run_load_tool(
+            "moduleDead",
+            {"module_weight_kg": 37.7, "module_length_mm": 2384, "module_width_mm": 1303},
+            "Europe(Eurocode 1991-4)",
+        )
+        self.assertEqual(dead["cases"][0]["value"], 0.1190)
 
     def test_stream_calls_the_tool_before_answering(self) -> None:
         script = _ScriptedModel()
@@ -396,7 +452,10 @@ class ChatTests(unittest.TestCase):
         ]
         self.assertTrue(tool_messages)
         self.assertIn("0.9072", tool_messages[0].content)
-        self.assertEqual(script.tool_names, ["windASCE16", "snowASCE16", "windEN1991", "snowEN1991"])
+        self.assertEqual(
+            script.tool_names,
+            ["windASCE16", "snowASCE16", "windEN1991", "snowEN1991", "moduleDead"],
+        )
 
     def test_explain_hides_key(self) -> None:
         settings = Settings(api_key="sk-secret", base_url="https://api.deepseek.com", model="deepseek-flash")
@@ -480,6 +539,31 @@ class LoadCheckTests(unittest.TestCase):
         self.assertIn("0.9072", answer)
         self.assertNotIn("还不能计算", answer)
 
+    def test_loads_ask_for_module_weight_before_the_dead_load(self) -> None:
+        case = {
+            "status": "confirmed",
+            "site": {"design_code": "USA(ASCE7-16)"},
+            "geometry": {"module_length_mm": 2384, "module_width_mm": 1303},
+        }
+        answer, wrote = answer_load_request(
+            LOADS,
+            json.dumps(case),
+            "甲项目",
+            [{"role": "user", "content": "计算荷载"}],
+        )
+        self.assertFalse(wrote)
+        self.assertIn("还不能计算", answer)
+        self.assertIn("组件重量是空的", answer)
+        self.assertNotIn("组件自重：", answer)
+
+    def test_colon_after_wei_is_written_before_the_check(self) -> None:
+        from agent.load_check import collect_updates
+
+        updates = collect_updates("风速时距改为:10 min mean\n地形类别为:I\n雪荷载暴露条件为:windswept")
+        self.assertEqual(updates["site.wind_speed_averaging"], "10 min mean")
+        self.assertEqual(updates["site.terrain_category"], "I")
+        self.assertEqual(updates["site.snow_exposure"], "windswept")
+
     def test_missing_case_does_not_calculate(self) -> None:
         answer, wrote = answer_load_request(LOADS, None, "aaaaa", [{"role": "user", "content": "算荷载"}])
         self.assertFalse(wrote)
@@ -510,6 +594,7 @@ class DesignCaseEditTests(unittest.TestCase):
         sample["site"]["risk_category"] = "I"
         sample["geometry"]["module_length_mm"] = 2384
         sample["geometry"]["module_width_mm"] = 1303
+        sample["geometry"]["module_weight_kg"] = 37.7
         sample["geometry"]["ground_clearance_mm"] = 800
         sample["geometry"]["arrangement_rows"] = 2
         with tempfile.TemporaryDirectory() as folder:
@@ -561,6 +646,8 @@ class DesignCaseEditTests(unittest.TestCase):
             self.assertNotIn("还不能计算", again)
             self.assertIn("峰值速度风压", again)
             self.assertIn("0.96", again)
+            self.assertIn("组件自重", again)
+            self.assertIn("0.119 kN/m2", again)
 
     def test_rejected_value_is_not_written(self) -> None:
         from agent.settings import ROOT
@@ -654,6 +741,18 @@ _EURO_CASE = {
         "arrangement_rows": 2,
     },
 }
+
+
+class WindowOriginTests(unittest.TestCase):
+    def test_centers_inside_the_work_area(self) -> None:
+        from agent.runtime import centered_origin
+
+        self.assertEqual(centered_origin(0, 0, 1920, 1040, 1360, 860), (280, 90))
+
+    def test_stays_inside_when_the_window_is_taller_than_the_screen(self) -> None:
+        from agent.runtime import centered_origin
+
+        self.assertEqual(centered_origin(0, 40, 1536, 800, 1360, 860), (88, 40))
 
 
 class _OpenRequest:

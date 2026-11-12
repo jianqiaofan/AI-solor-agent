@@ -16,7 +16,19 @@ from pydantic import BaseModel
 
 from agent.beam_layout import layout_view
 from agent.extract import ExtractionError, extract_project_materials
-from agent.intent import CHAT, EXTRACT, LOAD_INTENTS, UPDATE, classify_intent
+from agent.intent import (
+    CHAT,
+    DESIGN,
+    EXTRACT,
+    INQUIRE,
+    LOAD_INTENTS,
+    SAP,
+    UPDATE,
+    classify_intent,
+    resolve_project_inquiry,
+)
+from agent.line_model import answer_line_model, resolve_design_intent
+from agent.sap_request import answer_sap_request, resolve_sap_intent
 from agent.load_check import (
     answer_load_request,
     answer_parameter_update,
@@ -64,6 +76,7 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
     text: str = ""
     model: str | None = None
+    confirm_sap: bool = False
 
 
 class ProjectRequest(BaseModel):
@@ -191,7 +204,7 @@ async def add_materials(project_id: str, files: list[UploadFile] = File(...)):
 @app.post("/api/projects/{project_id}/open")
 def open_project_file(project_id: str, body: OpenFileRequest):
     try:
-        target = store.resolve_workspace_file(project_id, body.path)
+        target = store.resolve_workspace_file(project_id, body.path, allow_directory=True)
     except ProjectNotFound:
         return _fail(404, "没有这个项目。")
     except FileNotFoundError:
@@ -284,17 +297,24 @@ async def chat(body: ChatRequest, request: Request):
                 _busy.discard(conversation_id)
 
     async def replies():
+        if body.confirm_sap:
+            async for piece in _sap_events(conversation_id, summary, confirmed=True):
+                yield piece
+            return
         try:
             intent = await asyncio.to_thread(classify_intent, settings, text)
         except Exception:
             logger.exception("intent classification failed")
             intent = "chat"
         logger.info("intent %s", intent)
-        if intent in LOAD_INTENTS or intent in (CHAT, UPDATE):
+        if intent in LOAD_INTENTS or intent in (CHAT, UPDATE, DESIGN, INQUIRE, SAP):
             history = store.get(conversation_id)
             prior = history["messages"] if history else []
             intent = resolve_load_follow_up(intent, prior)
             intent = resolve_parameter_edit(intent, text)
+            intent = resolve_design_intent(intent, text, prior)
+            intent = resolve_project_inquiry(intent, text)
+            intent = resolve_sap_intent(intent, text, prior)
             logger.info("intent after follow-up %s", intent)
         if intent == EXTRACT:
             async for piece in _extraction_events(
@@ -313,12 +333,20 @@ async def chat(body: ChatRequest, request: Request):
             ):
                 yield piece
             return
+        if intent == SAP:
+            async for piece in _sap_events(conversation_id, summary):
+                yield piece
+            return
         if intent in LOAD_INTENTS:
             async for piece in _load_events(
                 conversation_id,
                 summary,
                 intent,
             ):
+                yield piece
+            return
+        if intent == DESIGN:
+            async for piece in _line_model_events(conversation_id, summary):
                 yield piece
             return
         parts: list[str] = []
@@ -328,7 +356,13 @@ async def chat(body: ChatRequest, request: Request):
             if history is None:
                 raise ConversationNotFound(conversation_id)
             project_name = summary.get("project_name", "")
-            messages = to_messages(history["messages"], project_name)
+            facts = intent == INQUIRE
+            messages = to_messages(
+                history["messages"],
+                project_name,
+                design_case=_design_case_text(project_name) if facts else None,
+                project_facts=facts,
+            )
             try:
                 async for piece in _stream(settings, messages, request):
                     parts.append(piece)
@@ -433,6 +467,33 @@ async def _parameter_events(conversation_id: str, summary: dict):
     yield _sse({"type": "done", "refresh_files": wrote})
 
 
+async def _sap_events(conversation_id: str, summary: dict, confirmed: bool = False):
+    yield _sse({"type": "meta", "conversation": summary})
+    history = store.get(conversation_id)
+    messages = history["messages"] if history else []
+    project_name = str(summary.get("project_name") or "")
+    try:
+        answer, wrote, show_layout, needs_dialog = await asyncio.to_thread(
+            answer_sap_request,
+            _design_case_text(project_name),
+            project_name,
+            messages,
+            _design_case_path(project_name),
+            confirmed,
+        )
+    except Exception:
+        logger.exception("sap request failed")
+        answer, wrote, show_layout, needs_dialog = "SAP2000 没有调用。", False, False, False
+    store.append_assistant(conversation_id, answer)
+    yield _sse({"type": "delta", "text": answer})
+    yield _sse({
+        "type": "done",
+        "refresh_files": wrote,
+        "refresh_layout": show_layout,
+        "confirm_sap": needs_dialog,
+    })
+
+
 async def _load_events(conversation_id: str, summary: dict, intent: str):
     yield _sse({"type": "meta", "conversation": summary})
     history = store.get(conversation_id)
@@ -453,6 +514,27 @@ async def _load_events(conversation_id: str, summary: dict, intent: str):
     store.append_assistant(conversation_id, answer)
     yield _sse({"type": "delta", "text": answer})
     yield _sse({"type": "done", "refresh_files": wrote})
+
+
+async def _line_model_events(conversation_id: str, summary: dict):
+    yield _sse({"type": "meta", "conversation": summary})
+    history = store.get(conversation_id)
+    messages = history["messages"] if history else []
+    project_name = str(summary.get("project_name") or "")
+    try:
+        answer, wrote, show_layout = await asyncio.to_thread(
+            answer_line_model,
+            _design_case_text(project_name),
+            project_name,
+            messages,
+            _design_case_path(project_name),
+        )
+    except Exception:
+        logger.exception("line model failed")
+        answer, wrote, show_layout = "支架线模没有布置出来。", False, False
+    store.append_assistant(conversation_id, answer)
+    yield _sse({"type": "delta", "text": answer})
+    yield _sse({"type": "done", "refresh_files": wrote, "refresh_layout": show_layout})
 
 
 def _design_case_path(project_name: str):

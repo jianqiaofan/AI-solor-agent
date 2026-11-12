@@ -5,6 +5,7 @@ import math
 from loads.tools import snow, wind
 from loads.tools.code_loads import (
     _external_coefficient,
+    moduleDead,
     snowASCE16,
     snowEN1991,
     tools_for_code,
@@ -133,11 +134,20 @@ def test_snow_en1991_windswept_flat_roof() -> None:
         raise AssertionError("不能用场地类型字母充当欧标暴露条件")
 
 
+def test_module_dead_is_weight_over_area() -> None:
+    got = moduleDead(37.7, 2384, 1303)
+    assert got["action"] == "dead"
+    assert got["cases"][0]["id"] == "D"
+    assert got["cases"][0]["value"] == 0.1190
+    assert got["cases"][0]["unit"] == "kN/m2"
+    assert "m·g / (L·W)" in got["trace"][0]["expression"]
+
+
 def test_tools_follow_the_design_code() -> None:
     asce = tools_for_code("USA(ASCE7-16)")
     europe = tools_for_code("Europe(Eurocode 1991-4)")
-    assert [item.name for item in asce] == ["windASCE16", "snowASCE16"]
-    assert [item.name for item in europe] == ["windEN1991", "snowEN1991"]
+    assert [item.name for item in asce] == ["windASCE16", "snowASCE16", "moduleDead"]
+    assert [item.name for item in europe] == ["windEN1991", "snowEN1991", "moduleDead"]
     try:
         tools_for_code("USA(ASCE7-10)")
     except ValueError as exc:
@@ -157,5 +167,6 @@ if __name__ == "__main__":
     test_wind_en1991_uses_zmin_when_panel_is_lower()
     test_wind_en1991_rejects_three_second_gust_and_bad_terrain()
     test_snow_en1991_windswept_flat_roof()
+    test_module_dead_is_weight_over_area()
     test_tools_follow_the_design_code()
     print("ok")

@@ -27,9 +27,37 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .app {
   height: 100vh;
   display: grid;
-  grid-template-columns: 268px minmax(0, 1fr) minmax(420px, 46vw);
+  grid-template-columns: var(--col-left, 268px) 8px minmax(0, 1fr) 8px var(--col-right, 420px);
 }
-.app:has(.results[hidden]) { grid-template-columns: 268px minmax(0, 1fr); }
+.app:has(#results[hidden]) {
+  grid-template-columns: var(--col-left, 268px) 8px minmax(0, 1fr);
+}
+.app:has(#results[hidden]) #split-right { display: none; }
+body.is-resizing, body.is-resizing * { cursor: col-resize !important; user-select: none !important; }
+
+.splitter {
+  position: relative;
+  z-index: 2;
+  touch-action: none;
+  cursor: col-resize;
+}
+.splitter::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: #e6e8ee;
+}
+.splitter:hover::after,
+.splitter.is-dragging::after,
+.splitter:focus-visible::after {
+  left: 2px;
+  width: 3px;
+  background: #0052d9;
+}
+.splitter:focus-visible { outline: none; }
 
 .sidebar {
   display: flex;
@@ -38,7 +66,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   min-height: 0;
   padding: 16px 14px 12px;
   background: #f5f6f8;
-  border-right: 1px solid #e6e8ee;
 }
 .brand { display: flex; gap: 10px; align-items: center; padding: 4px 4px 6px; }
 .brand-mark, .welcome-mark, .avatar {
@@ -365,7 +392,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   min-width: 0;
   min-height: 0;
   background: #f7f8fa;
-  border-left: 1px solid #e6e8ee;
 }
 .results[hidden] { display: none; }
 .tabs { display: flex; gap: 4px; padding: 12px; }

@@ -8,10 +8,10 @@ from dataclasses import dataclass
 
 MODULE_GAP_MM = 20.0
 DRIVE_GAP_MM = 500.0
-SPACING_MIN_MM = 7200.0
-SPACING_MAX_MM = 9000.0
-OVERHANG_MIN_MM = 900.0
-OVERHANG_MAX_MM = 1500.0
+SPACING_MIN_MM = 5000.0
+SPACING_MAX_MM = 10000.0
+OVERHANG_MIN_MM = 600.0
+OVERHANG_MAX_MM = 1600.0
 OVERHANG_AIM_MM = 1200.0
 ROUND_MM = 100.0
 _TOL = 1e-6
@@ -461,12 +461,21 @@ def _put(found: dict[float, Column], column: Column) -> None:
 def _unsolvable(zone: _Zone) -> str:
     distance = _mm(zone.span)
     if zone.kind == "interior":
-        return f"相邻驱动立柱相距 {distance} mm，等分后落不进 7200–9000 mm。"
+        return f"相邻驱动立柱相距 {distance} mm，等分后落不进 {_mm(SPACING_MIN_MM)}–{_mm(SPACING_MAX_MM)} mm。"
     if zone.kind == "start":
-        return f"起点到第一根驱动立柱 {distance} mm，放不下间距 7200–9000 mm 和悬挑 900–1500 mm。"
+        return (
+            f"起点到第一根驱动立柱 {distance} mm，放不下间距 {_mm(SPACING_MIN_MM)}–{_mm(SPACING_MAX_MM)} mm"
+            f" 和悬挑 {_mm(OVERHANG_MIN_MM)}–{_mm(OVERHANG_MAX_MM)} mm。"
+        )
     if zone.kind == "end":
-        return f"最后一根驱动立柱到终点 {distance} mm，放不下间距 7200–9000 mm 和悬挑 900–1500 mm。"
-    return f"主梁长度 {distance} mm，放不下间距 7200–9000 mm 和两端悬挑 900–1500 mm。"
+        return (
+            f"最后一根驱动立柱到终点 {distance} mm，放不下间距 {_mm(SPACING_MIN_MM)}–{_mm(SPACING_MAX_MM)} mm"
+            f" 和悬挑 {_mm(OVERHANG_MIN_MM)}–{_mm(OVERHANG_MAX_MM)} mm。"
+        )
+    return (
+        f"主梁长度 {distance} mm，放不下间距 {_mm(SPACING_MIN_MM)}–{_mm(SPACING_MAX_MM)} mm"
+        f" 和两端悬挑 {_mm(OVERHANG_MIN_MM)}–{_mm(OVERHANG_MAX_MM)} mm。"
+    )
 
 
 def _missing_inputs(geometry: dict) -> list[str]:

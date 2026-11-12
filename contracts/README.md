@@ -19,7 +19,7 @@ projects/{项目}/{修订}/
   design_case.json
   loads.json
   analysis_result.json
-  sap/                  # 模型与 SAP2000 运行文件
+  SAP2000/              # 模型与 SAP2000 运行文件
   manifest.json         # 输入校验值、命令版本、时间
 ```
 

@@ -53,22 +53,26 @@ def _serve() -> None:
 
 def _open_window() -> None:
     url = f"http://127.0.0.1:{PORT}"
+    width, height = 1360, 860
+    origin_x, origin_y = _initial_origin(width, height)
     try:
         import webview
 
         window = None
         for options in (
             {
-                "width": 1360,
-                "height": 860,
+                "width": width,
+                "height": height,
                 "min_size": (1024, 680),
                 "background_color": "#FFFFFF",
                 "text_select": True,
             },
-            {"width": 1360, "height": 860, "min_size": (1024, 680)},
+            {"width": width, "height": height, "min_size": (1024, 680)},
         ):
             try:
-                window = webview.create_window("设计助手", url, x=80, y=60, **options)
+                window = webview.create_window(
+                    "设计助手", url, x=origin_x, y=origin_y, **options
+                )
                 break
             except TypeError:
                 continue
@@ -79,7 +83,7 @@ def _open_window() -> None:
             try:
                 if window.x < -8000 or window.y < -8000:
                     window.restore()
-                    window.move(80, 60)
+                    window.move(origin_x, origin_y)
             except Exception:
                 logging.getLogger("agent").exception("窗口位置没有纠正")
 
@@ -114,7 +118,9 @@ def _hold_until_closed() -> None:
 
     root = tk.Tk()
     root.title("设计助手")
-    root.geometry("380x150")
+    width, height = 380, 150
+    origin_x, origin_y = _initial_origin(width, height)
+    root.geometry(f"{width}x{height}+{origin_x}+{origin_y}")
     tk.Label(
         root,
         text="设计助手已在浏览器中打开。\n关闭这个小窗口就会退出。",
@@ -142,6 +148,71 @@ def _configure_logging() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=handlers,
     )
+
+
+def centered_origin(
+    screen_x: int,
+    screen_y: int,
+    screen_width: int,
+    screen_height: int,
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    """把窗口放在一块屏幕区域的正中。区域比窗口小时贴住左上角。"""
+    return (
+        screen_x + max(0, (screen_width - width) // 2),
+        screen_y + max(0, (screen_height - height) // 2),
+    )
+
+
+def _initial_origin(width: int, height: int) -> tuple[int, int]:
+    try:
+        return centered_origin(*_screen_work_area(), width, height)
+    except Exception:
+        logging.getLogger("agent").exception("没有读到屏幕尺寸，窗口改放在左上角")
+        return 80, 60
+
+
+def _screen_work_area() -> tuple[int, int, int, int]:
+    if sys.platform == "win32":
+        area = _windows_work_area()
+        if area is not None:
+            return area
+    return _tk_screen_size()
+
+
+def _windows_work_area() -> tuple[int, int, int, int] | None:
+    import ctypes
+    from ctypes import wintypes
+
+    class RECT(ctypes.Structure):
+        _fields_ = (
+            ("left", wintypes.LONG),
+            ("top", wintypes.LONG),
+            ("right", wintypes.LONG),
+            ("bottom", wintypes.LONG),
+        )
+
+    rect = RECT()
+    # SPI_GETWORKAREA：主屏幕去掉任务栏后的区域，坐标和 pywebview 的逻辑像素一致。
+    if not ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+        return None
+    width = rect.right - rect.left
+    height = rect.bottom - rect.top
+    if width <= 0 or height <= 0:
+        return None
+    return rect.left, rect.top, width, height
+
+
+def _tk_screen_size() -> tuple[int, int, int, int]:
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        return 0, 0, int(root.winfo_screenwidth()), int(root.winfo_screenheight())
+    finally:
+        root.destroy()
 
 
 def _alert(text: str) -> None:

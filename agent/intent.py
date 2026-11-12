@@ -1,4 +1,4 @@
-"""用模型判断这句话要不要提取设计参数。"""
+"""用模型判断这句话要提取参数、算荷载、改参数，还是只布置支架线模。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,30 @@ WIND = "calculate_wind"
 SNOW = "calculate_snow"
 LOADS = "calculate_loads"
 UPDATE = "update_parameters"
+DESIGN = "design_line_model"
+SAP = "run_sap2000"
+INQUIRE = "inquire_project"
 CHAT = "chat"
 LOAD_INTENTS = (WIND, SNOW, LOADS)
+_PROJECT_FACTS = (
+    "组件排布",
+    "排布",
+    "桩埋深",
+    "埋深",
+    "桩入土",
+    "入土深度",
+    "项目情况",
+    "哪些参数",
+    "什么参数",
+    "组件尺寸",
+    "组件长度",
+    "组件宽度",
+    "离地高度",
+    "组件朝向",
+    "这个项目",
+    "本项目",
+    "当前项目",
+)
 
 _PROMPT = (
     "你是意图分类器。不要回答用户，不要摘取或编造任何设计数值。"
@@ -32,7 +54,23 @@ _PROMPT = (
     "风险类别、组件尺寸或离地高度，而这句没有要求现在就计算时，"
     '输出 {"intent":"update_parameters"}。'
     "既要改参数又要计算时，按要计算的那一种输出。"
-    "只问某个词的含义、还没让算、不要提取、以及和这些都无关的话，"
+    "要调用 SAP2000、做结构计算或计算内力时，"
+    '输出 {"intent":"run_sap2000"}。'
+    "没有线模或荷载时也按这一项输出，不要改成只算荷载或只出线模。"
+    "只算风、雪或荷载，没有要求 SAP2000、结构计算或内力时，不要输出 run_sap2000。"
+    "既要提取又要调用 SAP2000 时，按提取输出。"
+    "要设计支架、建立支架线模，或只要主梁和立柱的线模时，"
+    '输出 {"intent":"design_line_model"}。'
+    "这一步只布置线模。选截面、加荷载、运行 SAP2000 和出计算书都不要当成这一项。"
+    "既要提取又要设计时，按提取输出。既要计算荷载又要设计时，按要计算的那一种输出。"
+    "既要改参数又要设计时，按设计输出。"
+    "用户在了解当前项目已经记下的情况，例如组件排布、桩的埋深、离地高度、组件尺寸、朝向，"
+    "或问这个项目现在是什么情况时，"
+    '输出 {"intent":"inquire_project"}。'
+    "这是在问设计案例里已经有的内容，不是要求从资料重新提取，也不是改数值、计算荷载或设计支架。"
+    "既要了解情况又要提取时，按提取输出。既要了解情况又要计算时，按要计算的那一种输出。"
+    "既要了解情况又要改参数时，按改参数输出。既要了解情况又要设计支架时，按设计输出。"
+    "只问某个词的含义、还没让算、不要提取、不要设计、不是在问这个项目的情况，以及和这些都无关的话，"
     '输出 {"intent":"chat"}。'
     "既要提取又要计算时，按提取输出。"
 )
@@ -52,9 +90,39 @@ def parse_intent(raw: str) -> str:
         data = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return CHAT
-    if isinstance(data, dict) and data.get("intent") in (EXTRACT, WIND, SNOW, LOADS, UPDATE):
+    if isinstance(data, dict) and data.get("intent") in (EXTRACT, WIND, SNOW, LOADS, UPDATE, DESIGN, SAP, INQUIRE):
         return str(data["intent"])
     return CHAT
+
+
+def asks_about_project(text: str) -> bool:
+    """这句话是在问当前项目已经记下的情况，而不是在解释一个词。"""
+    if "项目" not in text and any(word in text for word in ("什么是", "啥是", "何谓", "什么意思", "含义")):
+        return False
+    return any(phrase in text for phrase in _PROJECT_FACTS)
+
+
+def resolve_project_inquiry(intent: str, text: str) -> str:
+    """了解项目情况时交给带设计案例的对话。提取、改参数、算荷载和设计优先。"""
+    if intent in LOAD_INTENTS or intent in (EXTRACT, DESIGN, UPDATE, SAP):
+        return intent
+    if any(word in text for word in ("计算", "算一下", "算风", "算雪", "算荷载")):
+        if intent == INQUIRE:
+            wind = "风" in text
+            snow = "雪" in text
+            if wind and snow:
+                return LOADS
+            if snow and not wind:
+                return SNOW
+            if wind and not snow:
+                return WIND
+            return LOADS
+        return intent
+    if any(phrase in text for phrase in ("提取设计", "找出设计指标", "阅读提交", "从资料表")):
+        return EXTRACT
+    if intent == INQUIRE or asks_about_project(text):
+        return INQUIRE
+    return intent
 
 
 def classify_intent(settings: Settings, text: str) -> str:

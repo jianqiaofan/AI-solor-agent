@@ -122,24 +122,46 @@ class Store:
         folders = []
         for folder_name in (MATERIALS_DIR, RESULTS_DIR):
             folder = (root / folder_name).resolve()
-            files = []
+            files: list[dict] = []
             if folder.is_dir() and _is_inside(folder, root):
-                for item in sorted(folder.rglob("*")):
-                    if not item.is_file() or item.name.startswith("~$") or item.name.endswith(".uploading"):
-                        continue
-                    resolved = item.resolve()
-                    if not _is_inside(resolved, root):
-                        continue
-                    files.append(
-                        {
-                            "name": item.relative_to(folder).as_posix(),
-                            "path": resolved.relative_to(self.projects_root.parent).as_posix(),
-                        }
-                    )
-                    if len(files) >= 200:
-                        break
+                self._append_workspace_files(folder, folder, root, files)
             folders.append({"name": folder_name, "files": files})
         return {"path": relative, "folders": folders}
+
+    def _append_workspace_files(
+        self,
+        folder: Path,
+        top: Path,
+        root: Path,
+        files: list[dict],
+    ) -> None:
+        if len(files) >= 200:
+            return
+        for item in sorted(folder.iterdir(), key=lambda path: path.name):
+            if item.name.startswith("~$") or item.name.endswith(".uploading"):
+                continue
+            resolved = item.resolve()
+            if not _is_inside(resolved, root):
+                continue
+            if item.is_dir() and item.name in {"sap", "SAP2000"} and folder == top:
+                record = self._file_record(item, top)
+                record["directory"] = True
+                files.append(record)
+                continue
+            if item.is_dir():
+                self._append_workspace_files(item, top, root, files)
+                continue
+            if item.is_file():
+                files.append(self._file_record(item, top))
+            if len(files) >= 200:
+                return
+
+    def _file_record(self, item: Path, top: Path) -> dict:
+        resolved = item.resolve()
+        return {
+            "name": item.relative_to(top).as_posix(),
+            "path": resolved.relative_to(self.projects_root.parent).as_posix(),
+        }
 
     def save_material(self, project_id: str, filename: str, content: bytes) -> dict:
         if not _ID.fullmatch(project_id or ""):
@@ -174,7 +196,12 @@ class Store:
             raise MaterialError("这个文件没有放进去。") from exc
         return {"name": name, "replaced": replaced}
 
-    def resolve_workspace_file(self, project_id: str, relative: str) -> Path:
+    def resolve_workspace_file(
+        self,
+        project_id: str,
+        relative: str,
+        allow_directory: bool = False,
+    ) -> Path:
         if not _ID.fullmatch(project_id or ""):
             raise ProjectNotFound(project_id)
         parts = Path(relative or "").parts
@@ -187,7 +214,9 @@ class Store:
             name = project["name"]
         root = (self.projects_root / name).resolve()
         candidate = (self.projects_root.parent / relative).resolve()
-        if not candidate.is_file() or not _is_inside(candidate, root):
+        if not candidate.is_file() and not (allow_directory and candidate.is_dir()):
+            raise FileNotFoundError(relative)
+        if not _is_inside(candidate, root):
             raise FileNotFoundError(relative)
         return candidate
 

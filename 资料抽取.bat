@@ -1,6 +1,8 @@
 @echo off
-set "APP_DIR=E:\cursor-demo\AI-solor-agent\subsystems\extraction"
-set "PYTHONW=C:\Users\jianq\miniconda3\envs\ai-solor-agent\pythonw.exe"
+set "ROOT=%~dp0"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+set "APP_DIR=%ROOT%\subsystems\extraction"
+set "PYTHONW=D:\developTools\miniconda3-26\envs\ai-solor-agent\pythonw.exe"
 
 if not exist "%PYTHONW%" (
   echo Cannot find %PYTHONW%

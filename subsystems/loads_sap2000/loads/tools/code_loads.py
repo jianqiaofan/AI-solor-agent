@@ -4,9 +4,11 @@
 
 - USA(ASCE7-16)：windASCE16、snowASCE16
 - Europe(Eurocode 1991-4)：windEN1991、snowEN1991
+- 两本规范都用 moduleDead 计算组件自重面荷载
 
 美标风、雪的数值与 loads.tools.wind、loads.tools.snow 相同。
 欧标风用 EN 1991-1-4 的峰值速度风压，欧标雪用 EN 1991-1-3 的屋面雪荷载。
+组件自重与规范无关，数值与 loads.tools.dead 相同。
 两本规范目前都只算到风压本身，不乘面板体型系数或风力系数。
 """
 
@@ -16,7 +18,7 @@ import math
 from typing import Any
 
 from loads.basis import MODULE_ORIENTATION, WIND_TILTS_DEG
-from loads.tools import snow, wind
+from loads.tools import dead, snow, wind
 from loads.tools.records import load_case, trace_step
 from loads.tools.units import to_kn_m2, to_mps
 
@@ -84,6 +86,43 @@ _EN_MONO_60_PARALLEL = (
     ("H", -1.0, -1.3),
     ("I", -1.2, -1.2),
 )
+
+
+def moduleDead(
+    module_weight_kg: float,
+    module_length_mm: float,
+    module_width_mm: float,
+) -> dict[str, Any]:
+    """计算组件自重面荷载，单位 kN/m²。
+
+    两本规范计算荷载时都要调用。只计组件，不含支架。
+    module_weight_kg 是单块组件重量，单位 kg。
+    module_length_mm、module_width_mm 是组件长和宽，单位 mm。
+    面荷载等于单块重量除以组件面积，与倾角、朝向无关。
+    重量先按 kg 换成 kN，再除以以 m² 计的面积。
+    """
+    trace: list[dict[str, Any]] = []
+    cases = dead.build(
+        {
+            "geometry": {
+                "module_weight_kg": module_weight_kg,
+                "module_length_mm": module_length_mm,
+                "module_width_mm": module_width_mm,
+            }
+        },
+        trace,
+    )
+    return _pack(
+        "组件自重",
+        "dead",
+        cases,
+        trace,
+        [
+            "只计组件自重，不含支架。",
+            "面荷载为单块重量除以组件面积，与倾角、朝向无关。",
+            "重量按 kg 换成 kN 后再除以面积，结果单位为 kN/m²。",
+        ],
+    )
 
 
 def windASCE16(
@@ -370,8 +409,8 @@ def snowEN1991(
 def tools_for_code(design_code: str) -> list[Any]:
     """返回这一本规范供模型调用的工具。其他规范先不要拿这两套公式去算。"""
     functions = {
-        _ASCE: (windASCE16, snowASCE16),
-        _EN: (windEN1991, snowEN1991),
+        _ASCE: (windASCE16, snowASCE16, moduleDead),
+        _EN: (windEN1991, snowEN1991, moduleDead),
     }.get(design_code)
     if functions is None:
         raise ValueError(

@@ -27,6 +27,7 @@ _LABELS = {
     "geometry.module_width_mm": "组件宽度",
     "geometry.ground_clearance_mm": "组件下沿离地高度",
     "geometry.arrangement_rows": "组件排数",
+    "geometry.arrangement_columns": "布置列数",
     "geometry.pile_embedment_depth_mm": "桩入土深度",
     "site.temperature_high_c": "极端最高温度",
     "site.temperature_low_c": "极端最低温度",
