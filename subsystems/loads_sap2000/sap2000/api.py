@@ -1,40 +1,67 @@
-"""通过本机 SAP2000 OAPI 建模、运行并读回杆件内力。"""
+"""通过本机 SAP2000 OAPI 建模、运行并读回杆件内力。
+
+build 建一次模型：材料、截面表里的全部截面、杆件、柱脚、荷载和组合。
+solve 按给定的截面分配运行一次分析，可以反复调用。
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from sap2000.model import SECTION
-
 _KN_M_C = 6
 _GRAVITY = 10
 _FORCE_PER_LENGTH = 1
+_STEEL = 1
+_WEIGHT_PER_VOLUME = 1
+_G = 9.80665
 
 
 class SapSession:
     def __init__(self, program: Path) -> None:
         self.program = program
         self.model: Any = None
+        self._members: list[dict[str, Any]] = []
+        self._cases: list[dict[str, Any]] = []
+        self._combinations: list[dict[str, Any]] = []
+        self._model_path: Path | None = None
+        self._analyzed = False
 
-    def run(
+    def build(
         self,
         members: list[dict[str, Any]],
         cases: list[dict[str, Any]],
         combinations: list[dict[str, Any]],
+        table: dict[str, Any],
         model_path: Path,
-    ) -> dict[str, list[dict[str, float]]]:
+    ) -> None:
+        self._members = members
+        self._cases = cases
+        self._combinations = combinations
+        self._model_path = model_path
         self._start()
-        self._define()
+        self._define(table)
         points = self._draw(members)
         self._support(members, points)
         self._loads(members, cases, combinations)
-        model_path.parent.mkdir(parents=True, exist_ok=True)
-        # 分析前必须先存盘。分析后再保存会解锁模型并清掉结果，所以内力要在这次保存之前读完。
-        _check(self.model.File.Save(str(model_path)), "保存模型")
-        self._analyze(cases)
-        self._require_finished(cases)
-        return self._read_forces(members, cases, combinations)
+
+    def solve(self, assignment: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
+        model = self.model
+        if self._analyzed:
+            _check(model.SetModelIsLocked(False), "解锁模型")
+        for member in self._members:
+            _check(
+                model.FrameObj.SetSection(member["sap_name"], assignment[member["id"]], 0),
+                f"给 {member['id']} 指定截面",
+            )
+        assert self._model_path is not None
+        self._model_path.parent.mkdir(parents=True, exist_ok=True)
+        # 分析前必须先存盘。分析后再保存会解锁模型并清掉结果，所以内力要在下一次保存之前读完。
+        _check(model.File.Save(str(self._model_path)), "保存模型")
+        self._analyze(self._cases)
+        self._require_finished(self._cases)
+        self._analyzed = True
+        return self._read_forces(self._members, self._cases, self._combinations)
 
     def _start(self) -> None:
         import comtypes.client
@@ -50,35 +77,54 @@ class SapSession:
         _check(sap_object.ApplicationStart(_KN_M_C, True), "启动 SAP2000")
         self.model = sap_object.SapModel
 
-    def _define(self) -> None:
+    def _define(self, table: dict[str, Any]) -> None:
         model = self.model
+        material = table["material"]
+        name = str(material["name"])
         _check(model.InitializeNewModel(_KN_M_C), "初始化模型")
         _check(model.File.NewBlank(), "新建空模型")
         _check(model.SetPresentUnits(_KN_M_C), "设置单位")
-        _check(model.PropMaterial.SetMaterial("EQMAT", 1), "定义材料")
-        _check(model.PropMaterial.SetMPIsotropic("EQMAT", 2.0e8, 0.3, 1.2e-5), "定义弹性模量")
-        _check(model.PropMaterial.SetWeightAndMass("EQMAT", 1, 0), "去掉材料自重")
+        _check(model.PropMaterial.SetMaterial(name, _STEEL), f"定义材料 {name}")
         _check(
-            model.PropFrame.SetGeneral(
-                SECTION,
-                "EQMAT",
-                0.2,
-                0.2,
-                0.01,
-                0.008,
-                0.008,
-                1.0e-4,
-                1.0e-4,
-                1.0e-4,
-                1.0e-3,
-                1.0e-3,
-                1.0e-3,
-                1.0e-3,
-                0.1,
-                0.1,
+            model.PropMaterial.SetMPIsotropic(
+                name,
+                float(material["E_mpa"]) * 1e3,
+                float(material["poisson"]),
+                float(material["thermal_expansion"]),
             ),
-            "定义等刚度截面",
+            f"定义 {name} 的弹性模量",
         )
+        weight = float(material["density_kg_m3"]) * _G / 1000.0
+        _check(model.PropMaterial.SetWeightAndMass(name, _WEIGHT_PER_VOLUME, weight), f"定义 {name} 的重度")
+        depth = float(table["across_flats_mm"]) / 1000.0
+        for section in table["sections"]:
+            area = float(section["area_mm2"]) * 1e-6
+            shear = float(section["shear_area_mm2"]) * 1e-6
+            inertia = float(section["I_mm4"]) * 1e-12
+            elastic = float(section["W_el_corner_mm3"]) * 1e-9
+            plastic = float(section["W_pl_corner_mm3"]) * 1e-9
+            radius = float(section["radius_of_gyration_mm"]) / 1000.0
+            _check(
+                model.PropFrame.SetGeneral(
+                    section["name"],
+                    name,
+                    depth,
+                    depth,
+                    area,
+                    shear,
+                    shear,
+                    float(section["torsion_constant_mm4"]) * 1e-12,
+                    inertia,
+                    inertia,
+                    elastic,
+                    elastic,
+                    plastic,
+                    plastic,
+                    radius,
+                    radius,
+                ),
+                f"定义截面 {section['name']}",
+            )
         # 只保留所在平面内的平动和弯曲，避免一根直线模型在平面外成为机构。
         _check(model.Analyze.SetActiveDOF([False, True, True, True, False, False]), "设置平面自由度")
 
@@ -100,7 +146,7 @@ class SapSession:
                 i_name,
                 j_name,
                 member["id"],
-                SECTION,
+                member["section"],
                 member["id"],
             )
             _check(code, f"建立杆件 {member['id']}")
@@ -139,7 +185,7 @@ class SapSession:
         beams = [item for item in members if item["role"] == "beam"]
         for case in cases:
             _check(
-                model.LoadPatterns.Add(case["id"], case["pattern"], 0, True),
+                model.LoadPatterns.Add(case["id"], case["pattern"], float(case.get("self_weight", 0)), True),
                 f"建立荷载工况 {case['id']}",
             )
             for beam in beams:
@@ -188,24 +234,25 @@ class SapSession:
         members: list[dict[str, Any]],
         cases: list[dict[str, Any]],
         combinations: list[dict[str, Any]],
-    ) -> dict[str, list[dict[str, float]]]:
+    ) -> dict[str, list[dict[str, Any]]]:
         setup = self.model.Results.Setup
         _check(setup.DeselectAllCasesAndCombosForOutput(), "清空结果选择")
         for case in cases:
             _check(setup.SetCaseSelectedForOutput(case["id"], True), f"选择工况 {case['id']}")
         for combo in combinations:
             _check(setup.SetComboSelectedForOutput(combo["id"], True), f"选择组合 {combo['id']}")
-        found: dict[str, list[dict[str, float]]] = {}
+        found: dict[str, list[dict[str, Any]]] = {}
         for member in members:
             found[member["id"]] = _frame_rows(self.model, member["sap_name"])
         return found
 
 
-def _frame_rows(model: Any, name: str) -> list[dict[str, float]]:
+def _frame_rows(model: Any, name: str) -> list[dict[str, Any]]:
     result = model.Results.FrameForce(name, 0, 0, [], [], [], [], [], [], [], [], [], [], [], [], [])
     if not isinstance(result, (tuple, list)) or len(result) < 15:
         raise RuntimeError(f"读不到 {name} 的内力。")
     count = int(result[0])
+    case = result[5]
     p, v2, v3, t, m2, m3, code = result[8], result[9], result[10], result[11], result[12], result[13], result[14]
     _check(code, f"读取 {name} 的内力")
     if count <= 0:
@@ -214,6 +261,7 @@ def _frame_rows(model: Any, name: str) -> list[dict[str, float]]:
     for index in range(count):
         rows.append(
             {
+                "case": str(case[index]),
                 "P": float(p[index]),
                 "V2": float(v2[index]),
                 "V3": float(v3[index]),

@@ -89,7 +89,7 @@ def test_build_loads_matches_schema() -> None:
     assert by_id["S_0"] == 0.9072
     assert by_id["W_QH_0"] == by_id["W_QH_60"]
     assert by_id["W_QH_0"] > 0
-    assert loads["combinations"] == []
+    assert [item["id"] for item in loads["combinations"]] == ["LRFD1", "LRFD2_S_0", "LRFD3_S_0"]
 
 
 if __name__ == "__main__":

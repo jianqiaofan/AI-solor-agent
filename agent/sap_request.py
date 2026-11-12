@@ -137,7 +137,7 @@ def _call(case_text: str | None, path: Path | None) -> tuple[str, bool]:
         sys.path.insert(0, str(package_root))
     from sap2000.model import report
     from sap2000.program import sap2000_executable
-    from sap2000.runner import run_analysis
+    from sap2000.runner import run_design
 
     try:
         program = sap2000_executable()
@@ -146,13 +146,14 @@ def _call(case_text: str | None, path: Path | None) -> tuple[str, bool]:
     work_dir = path.parent / "SAP2000" if path is not None else package_root / "sap2000" / "templates"
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
-        result = run_analysis(case, loads, package_root / "sap2000" / "templates", work_dir)
+        result, design = run_design(case, loads, work_dir)
     except Exception as exc:
         return f"SAP2000 没有完成计算。{exc}", False
     if path is not None:
-        destination = path.parent / "analysis_result.json"
-        destination.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    return report(result, str(program)), True
+        for name, document in (("analysis_result.json", result), ("section_design.json", design)):
+            destination = path.parent / name
+            destination.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report(result, str(program), design), True
 
 
 def _line_current(case_text: str | None, line_path: Path | None) -> bool:

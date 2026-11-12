@@ -1,14 +1,12 @@
-"""把线模和线荷载整理成 SAP2000 要算的杆件，并取出最大内力。
+"""把线模和线荷载整理成 SAP2000 要算的杆件，取出最大内力，并写出结果和说明。
 
-项目还没有截面。主梁和立柱使用同一个刚度，柱脚铰接，柱顶刚接。
-线弹性静力的内力只取决于这个相对刚度，不代表已经选定的产品截面。
+柱脚铰接，柱顶与主梁刚接。截面从截面表里挑选。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-SECTION = "等刚度"
 FORCE_KEYS = ("N", "Vy", "Vz", "T", "My", "Mz")
 _SAP_KEYS = ("P", "V2", "V3", "T", "M2", "M3")
 
@@ -56,12 +54,15 @@ def beam_line_loads(loads: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if item.get("target") != "beam" or item.get("unit") != "kN/m":
             continue
+        pattern = _pattern_type(str(item["id"]))
         found.append(
             {
                 "id": str(item["id"]),
                 "name": str(item.get("name") or item["id"]),
                 "value": float(item["value"]),
-                "pattern": _pattern_type(str(item["id"])),
+                "pattern": pattern,
+                # 钢构件自重算进组件自重工况，一起参与组合。
+                "self_weight": 1.0 if pattern == 1 else 0.0,
             }
         )
     if not found:
@@ -105,17 +106,20 @@ def analysis_document(
     revision: str,
     model_file: str,
     members: list[dict[str, Any]],
-    forces_by_member: dict[str, list[dict[str, float]]],
+    forces_by_member: dict[str, list[dict[str, Any]]],
+    sections: dict[str, str],
+    ratios: dict[str, float],
+    passed: bool,
 ) -> dict[str, Any]:
     recorded = []
     for member in members:
         recorded.append(
             {
                 "id": member["id"],
-                "section": SECTION,
+                "section": sections[member["id"]],
                 "length": round(float(member["length"]), 4),
                 "forces": extreme_forces(forces_by_member[member["id"]]),
-                "ratio": -1,
+                "ratio": round(float(ratios[member["id"]]), 4),
             }
         )
     return {
@@ -123,28 +127,52 @@ def analysis_document(
         "design_case_revision": revision,
         "model_file": model_file,
         "template": "line-model",
-        "check_status": "not_checked",
+        "check_status": "passed" if passed else "failed",
         "members": recorded,
         "reactions": [],
         "displacements": [],
     }
 
 
-def report(result: dict[str, Any], program: str) -> str:
+def report(result: dict[str, Any], program: str, design: dict[str, Any]) -> str:
+    verdict = "设计合格" if result["check_status"] == "passed" else "设计不合格"
     lines = [
-        f"已用 SAP2000 完成计算：{program}。",
-        "项目没有给出截面。主梁和立柱用同一个刚度，柱脚铰接，柱顶刚接。内力是这个模型的结果。",
-        "每个内力分量取全部已算工况里绝对值最大的值，并保留正负号。正值指向下方。",
-        "应力比还没有验算。",
-        f"模型文件：{result['model_file']}。",
+        f"已用 SAP2000 完成计算和截面选择：{program}。{verdict}。",
+        f"截面表：{design['table']}，材质 {design['material']}，fy = {design['fy_mpa']:g} MPa。",
+        (
+            f"组合按 {design['combination_basis']}，共 {len(design['combinations'])} 个。"
+            "每根杆件同时检查单个工况和全部组合，取最不利。"
+        ),
+        (
+            f"选截面时要求应力比不超过 {design['select_limit']:g}，并取单米重最轻的；"
+            f"SAP2000 重新计算后应力比不超过 {design['accept_limit']:g} 才算合格。"
+        ),
     ]
+    for item in design["rounds"]:
+        worst = max(item["ratios"].items(), key=lambda pair: pair[1])
+        used = sorted(set(item["sections"].values()))
+        lines.append(
+            f"第 {item['round']} 次计算：截面 {'、'.join(used)}，最大应力比 {worst[1]:.3f}（{worst[0]}）。"
+        )
+    if design.get("message"):
+        lines.append(design["message"])
+    lines.append(f"钢构件总重 {design['total_mass_kg']:.1f} kg（不含连接件）。")
+    lines.append(f"模型文件：{result['model_file']}。")
+    by_id = {item["id"]: item for item in design["members"]}
     for member in result["members"]:
         force = member["forces"]
+        detail = by_id[member["id"]]
         lines.append(
-            f"{member['id']}  L={member['length']} m  "
+            f"{member['id']}  L={member['length']} m  {member['section']}  "
+            f"应力比 {member['ratio']:.3f}（{detail['governing']}）  "
             f"N={force['N']} kN  Vy={force['Vy']} kN  Vz={force['Vz']} kN  "
-            f"T={force['T']} kN·m  My={force['My']} kN·m  Mz={force['Mz']} kN·m"
+            f"My={force['My']} kN·m  Mz={force['Mz']} kN·m"
         )
+    lines.append(
+        "内力取全部工况和组合里绝对值最大的值，保留正负号，正值指向下方。"
+        "应力比按截面强度：√(σ² + 3τ²) / (0.9 fy)，σ 用角轴弹性截面模量。"
+        "立柱整体稳定和板件局部屈曲没有验算。"
+    )
     return "\n".join(lines)
 
 
@@ -161,7 +189,7 @@ def _member(
     member: dict[str, Any] = {
         "id": name,
         "role": role,
-        "section": SECTION,
+        "section": "",
         "i": i_m,
         "j": j_m,
         "length": length,

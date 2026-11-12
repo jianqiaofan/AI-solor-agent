@@ -270,7 +270,7 @@ def _save_loads(
         "schema_version": "1.0.0",
         "design_case_revision": revision.strip(),
         "cases": cases,
-        "combinations": [],
+        "combinations": _combinations(cases),
         "trace": trace,
     }
     from jsonschema import Draft202012Validator
@@ -329,6 +329,13 @@ def _summary_lines(area_cases: list[dict[str, Any]], length_mm: float) -> list[s
     from loads.tools.line_load import summary_lines
 
     return summary_lines(area_cases, length_mm)
+
+
+def _combinations(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    _ensure_line_load()
+    from loads.tools.combinations import strength_combinations
+
+    return strength_combinations(cases)
 
 
 def _is_module_area_load(item: dict[str, Any]) -> bool:

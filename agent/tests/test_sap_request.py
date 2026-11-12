@@ -17,25 +17,40 @@ if str(_PACKAGE) not in sys.path:
     sys.path.insert(0, str(_PACKAGE))
 
 
-def _calculated_result() -> dict:
-    return {
+def _calculated_result() -> tuple[dict, dict]:
+    result = {
         "schema_version": "1.0.0",
         "design_case_revision": "r0",
         "model_file": "model.sdb",
         "template": "line-model",
-        "check_status": "not_checked",
+        "check_status": "passed",
         "members": [
             {
                 "id": "B1",
-                "section": "等刚度",
+                "section": "OCT165x2.0",
                 "length": 1.0,
                 "forces": {"N": 0.0, "Vy": 0.0, "Vz": 1.5, "T": 0.0, "My": 0.0, "Mz": -2.5},
-                "ratio": -1,
+                "ratio": 0.42,
             }
         ],
         "reactions": [],
         "displacements": [],
     }
+    design = {
+        "table": "secton-octagon-165.json",
+        "material": "Q355B",
+        "fy_mpa": 355.0,
+        "phi": 0.9,
+        "select_limit": 0.95,
+        "accept_limit": 1.0,
+        "combination_basis": "ASCE 7-16 第 2.3.1 节强度设计（LRFD）",
+        "combinations": [{"id": "LRFD1", "formula": "1.4D"}],
+        "rounds": [{"round": 1, "sections": {"B1": "OCT165x2.0"}, "ratios": {"B1": 0.42}}],
+        "members": [{"id": "B1", "section": "OCT165x2.0", "ratio": 0.42, "governing": "LRFD1"}],
+        "total_mass_kg": 8.48,
+        "message": "",
+    }
+    return result, design
 
 
 def _ready_case() -> dict:
@@ -93,7 +108,7 @@ class SapIntentTests(unittest.TestCase):
 
 class SapRequestTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.ran = patch("sap2000.runner.run_analysis", return_value=_calculated_result()).start()
+        self.ran = patch("sap2000.runner.run_design", return_value=_calculated_result()).start()
         self.addCleanup(patch.stopall)
 
     def test_missing_parameters_are_asked_and_sap_is_not_called(self) -> None:
@@ -154,6 +169,11 @@ class SapRequestTests(unittest.TestCase):
             self.assertTrue(any(item.startswith("W_") for item in by_id))
             self.assertTrue(any(item.startswith("S_") for item in by_id))
             self.assertIn("主梁线荷载", reply)
+            combos = {item["id"]: item["factors"] for item in saved["combinations"]}
+            self.assertEqual(combos["LRFD1"], [{"case_id": "D", "factor": 1.4}])
+            self.assertIn("LRFD5_W_0_F", combos)
+            self.assertIn("LRFD4_W_0_F_S_0", combos)
+            self.assertNotIn("LRFD4_W_60_0_F_S_0", combos)
 
     def test_confirmation_reaches_sap_without_inventing_forces(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -202,7 +222,11 @@ class SapRequestTests(unittest.TestCase):
             self.ran.assert_called_once()
             saved = json.loads((path.parent / "analysis_result.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["members"][0]["forces"]["Mz"], -2.5)
-            self.assertEqual(saved["check_status"], "not_checked")
+            self.assertEqual(saved["check_status"], "passed")
+            self.assertIn("设计合格", called)
+            self.assertIn("OCT165x2.0", called)
+            design = json.loads((path.parent / "section_design.json").read_text(encoding="utf-8"))
+            self.assertEqual(design["members"][0]["governing"], "LRFD1")
 
     def test_existing_files_can_be_called_without_calculating_again(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
